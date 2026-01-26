@@ -4,7 +4,6 @@
 #include "ch32v00x.h"
 #include <stdint.h>
 
-
 // SPI1 Pins for NRF24L01
 #define NRF_SCK_PIN GPIO_Pin_5  // PC5
 #define NRF_MOSI_PIN GPIO_Pin_6 // PC6
@@ -14,6 +13,13 @@
 
 // User Interface
 #define BUTTON_PIN GPIO_Pin_6 // PD6
+#define LED_PIN GPIO_Pin_2    // PD2
+
+// Water Level Probe Pins (Input with Pull-up)
+#define SENSOR_PIN_25 GPIO_Pin_0  // PC0
+#define SENSOR_PIN_50 GPIO_Pin_1  // PC1
+#define SENSOR_PIN_75 GPIO_Pin_2  // PC2
+#define SENSOR_PIN_100 GPIO_Pin_4 // PC4
 
 // Timing
 #define LONG_PRESS_TIME_MS 3000
