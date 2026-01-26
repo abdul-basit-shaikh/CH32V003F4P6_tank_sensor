@@ -69,13 +69,17 @@ void run_pairing(void) {
   nrf24_set_tx_addr(PAIRING_ADDR);
 
   for (int i = 0; i < 500; i++) {
-    printf("[PAIR] Req %d/1000: ", i + 1);
-    if (nrf24_send(packet, 32)) {
-      printf("RAW DISPATCH OK\r\n");
-    } else {
-      printf("Radio Busy\r\n");
+    if (i % 10 == 0) {
+      printf("[PAIR] Req %d/500: ", i + 1);
     }
-    Delay_Ms(500); // 20Hz burst for perfect scan overlap
+    if (nrf24_send(packet, 32)) {
+      if (i % 10 == 0)
+        printf("OK\r\n");
+    } else {
+      if (i % 10 == 0)
+        printf("Radio Busy\r\n");
+    }
+    Delay_Ms(50); // Fast burst for better pairing (20Hz)
   }
 }
 
@@ -104,37 +108,37 @@ int main(void) {
 
   printf("[SYSTEM] Entering Daily Mode.\r\n");
 
-  while (1) {
-    // Every 1000ms (X-RAY MODE)
-    if (millis() - g_last_send > 1000) {
-      uint8_t packet[32] = {0xAA,
-                            0x55,
-                            0x03,
-                            32,
-                            (uint8_t)(g_tank_id >> 8),
-                            (uint8_t)(g_tank_id & 0xFF),
-                            95,
-                            85};
+  // while (1) {
+  //   // Every 1000ms (X-RAY MODE)
+  //   if (millis() - g_last_send > 1000) {
+  //     uint8_t packet[32] = {0xAA,
+  //                           0x55,
+  //                           0x03,
+  //                           32,
+  //                           (uint8_t)(g_tank_id >> 8),
+  //                           (uint8_t)(g_tank_id & 0xFF),
+  //                           95,
+  //                           85};
 
-      printf("[DATA] Send Packet Dispatched...");
-      nrf24_power_up_tx();
-      if (nrf24_send(packet, 32))
-        printf(" OK (ACK)\r\n");
-      else
-        printf(" FAIL (Lost)\r\n");
+  //     printf("[DATA] Send Packet Dispatched...");
+  //     nrf24_power_up_tx();
+  //     if (nrf24_send(packet, 32))
+  //       printf(" OK (ACK)\r\n");
+  //     else
+  //       printf(" FAIL (Lost)\r\n");
 
-      g_last_send = millis();
-    }
+  //     g_last_send = millis();
+  //   }
 
-    // Health Check every 10s
-    static uint32_t last_check = 0;
-    if (millis() - last_check > 10000) {
-      if (nrf24_get_setup() != 0x26) {
-        printf("[WARN] Radio Config mismatch! Recovering...\r\n");
-        nrf24_init();
-      }
-      last_check = millis();
-    }
-    Delay_Ms(10);
-  }
+  //   // Health Check every 10s
+  //   static uint32_t last_check = 0;
+  //   if (millis() - last_check > 10000) {
+  //     if (nrf24_get_setup() != 0x26) {
+  //       printf("[WARN] Radio Config mismatch! Recovering...\r\n");
+  //       nrf24_init();
+  //     }
+  //     last_check = millis();
+  //   }
+  //   Delay_Ms(10);
+  // }
 }

@@ -177,7 +177,7 @@ void nrf24_set_rx_addr(const uint8_t *addr) {
 }
 
 void nrf24_power_up_tx(void) {
-  printf("[RADIO] >>> POWER_UP: TRANSMITTER MODE (NO-CRC) <<<\r\n");
+  // printf("[RADIO] >>> POWER_UP: TRANSMITTER MODE (NO-CRC) <<<\r\n");
   nrf_write_reg(0x00, 0x02); // PWR_UP, Transmitter, No-CRC
   Delay_Ms(5);
 }
@@ -190,43 +190,24 @@ void nrf24_power_up_rx(void) {
 }
 
 bool nrf24_send(uint8_t *data, uint8_t len) {
-  // Reduced logging to prevent UART overflow
-  // printf("[RADIO] >>> DATA DISPATCH: 32 BYTES START <<<\r\n");
-
-  // Delay_Ms(10); // Removed - not needed
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_FLUSH_TX);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-  // printf("[SPI] CMD: FLUSH_TX\r\n");
 
-  // printf("[SPI] CMD: W_TX_PAYLOAD (32B): ");
-  // for (int i = 0; i < 32; i++)
-  //   printf("%02X ", i < len ? data[i] : 0);
-  // printf("\r\n");
-
-  // Delay_Ms(10); // Removed - not needed
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_W_TX_PL);
   for (uint8_t i = 0; i < 32; i++)
     spi_xfer(i < len ? data[i] : 0);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-  // printf("[SPI] W_TX_PAYLOAD: Dispatch complete.\r\n");
 
-  // printf("[GPIO] CE HIGH -> Start TX Pulse\r\n");
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
   Delay_Ms(1); // Short pulse for transmission
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
-  // printf("[GPIO] CE LOW -> End TX Pulse\r\n");
 
-  // NO-ACK MODE: Just wait for TX to complete (no ACK expected)
-  // In NO-ACK mode, packet is sent immediately without waiting for ACK
-  Delay_Ms(2); // Small delay for transmission to complete
-
-  // Clear any flags
+  Delay_Ms(2);               // Small delay for transmission to complete
   nrf_write_reg(0x07, 0x30); // Clear TX_DS and MAX_RT flags
 
-  // printf("[RADIO] TX COMPLETE (NO-ACK MODE)\r\n");
-  return true; // Always return success in NO-ACK mode
+  return true;
 }
 
 bool nrf24_available(void) {
