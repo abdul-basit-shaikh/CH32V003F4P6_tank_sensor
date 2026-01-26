@@ -108,37 +108,11 @@ int main(void) {
 
   printf("[SYSTEM] Entering Daily Mode.\r\n");
 
-  // while (1) {
-  //   // Every 1000ms (X-RAY MODE)
-  //   if (millis() - g_last_send > 1000) {
-  //     uint8_t packet[32] = {0xAA,
-  //                           0x55,
-  //                           0x03,
-  //                           32,
-  //                           (uint8_t)(g_tank_id >> 8),
-  //                           (uint8_t)(g_tank_id & 0xFF),
-  //                           95,
-  //                           85};
+  printf("[SYSTEM] Entering Idle Mode.\r\n");
 
-  //     printf("[DATA] Send Packet Dispatched...");
-  //     nrf24_power_up_tx();
-  //     if (nrf24_send(packet, 32))
-  //       printf(" OK (ACK)\r\n");
-  //     else
-  //       printf(" FAIL (Lost)\r\n");
-
-  //     g_last_send = millis();
-  //   }
-
-  //   // Health Check every 10s
-  //   static uint32_t last_check = 0;
-  //   if (millis() - last_check > 10000) {
-  //     if (nrf24_get_setup() != 0x26) {
-  //       printf("[WARN] Radio Config mismatch! Recovering...\r\n");
-  //       nrf24_init();
-  //     }
-  //     last_check = millis();
-  //   }
-  //   Delay_Ms(10);
-  // }
+  while (1) {
+    // Idle loop - Pairing is complete.
+    // Add sensor reading and data transmission logic here later.
+    Delay_Ms(1000);
+  }
 }
