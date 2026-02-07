@@ -10,7 +10,7 @@
 /* ========== Global Variables ========== */
 const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7, 0xE7}; // 3-byte pairing address
 volatile uint32_t g_millis = 0;
-uint16_t g_tank_id = 0x1234;
+uint16_t g_tank_id;
 uint32_t g_last_send = 0;
 
 /* ========== TIM2 for millis (1ms) ========== */
@@ -88,8 +88,34 @@ uint8_t read_tank_level(void) {
   return 0; // Empty
 }
 
+/* ========== Auto-Generate Tank ID ========== */
+uint16_t generate_new_tank_id(void) {
+  // Generate a pseudo-random 16-bit ID using current millis
+  // This ensures each reset produces a different ID
+  uint32_t seed = millis();
+
+  // Simple pseudo-random algorithm using bit manipulation
+  seed = (seed ^ (seed << 13));
+  seed = (seed ^ (seed >> 17));
+  seed = (seed ^ (seed << 5));
+
+  // Ensure ID is never 0x0000 (reserved for invalid)
+  uint16_t new_id = (uint16_t)(seed & 0xFFFF);
+  if (new_id == 0x0000) {
+    new_id = 0x0001;
+  }
+
+  return new_id;
+}
+
 /* ========== Pairing Task ========== */
 void run_pairing(void) {
+  // Generate new tank ID on every pairing/reset
+  g_tank_id = generate_new_tank_id();
+
+  printf("\r\n[PAIR] Tank ID changed: 0x%04X\r\n", g_tank_id);
+  printf("\r\n[PAIR] Tank ID changed: %d\r\n", g_tank_id);
+
   uint8_t packet[32] = {0};
   packet[0] = 0xAA;
   packet[1] = 0x55;
@@ -181,7 +207,7 @@ int main(void) {
     static uint32_t last_dispatch = 0;
     if (millis() - last_dispatch > 10000) {
       // uint8_t level = read_tank_level();
-      uint8_t level = 50; // temp hai baad mai is ko remove kr na hai
+      uint8_t level = 50;   // temp hai baad mai is ko remove kr na hai
       uint8_t battery = 85; // Placeholder for battery voltage logic
 
       uint8_t packet[32] = {0xAA,
