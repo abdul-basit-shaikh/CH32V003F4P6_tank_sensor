@@ -61,7 +61,7 @@ void gpio_init(void) {
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
   GPIO_Init(GPIOD, &GPIO_InitStructure);
 
-  GPIO_ResetBits(GPIOD, LED_PIN); // Turn off at start
+  GPIO_SetBits(GPIOD, LED_PIN); // Turn off at start (Active-Low)
 
   // Sensor Pins: PC0, PC1, PC2, PC4 (Input Pull-up)
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
@@ -136,27 +136,29 @@ void run_pairing(void) {
   packet[5] = (g_tank_id >> 8);   // MSB second
   packet[31] = calculate_checksum(packet, 32);
 
-  printf("\r\n[PAIR] Starting DISCOVERY BROADCAST [3-BYTE RAW] (Ch:99)...\r\n");
+  printf("\r\n[PAIR] Starting DISCOVERY BROADCAST for %d min (Ch:99)...\r\n",
+         PAIRING_TIME_MINS);
   printf("[PAIR] Checksum: 0x%02X\r\n", packet[31]);
   nrf24_power_up_tx();
   nrf24_set_tx_addr(PAIRING_ADDR);
 
-  for (int i = 0; i < 500; i++) {
-    // LED fast blink during pairing
-    if (i % 2 == 0)
-      GPIO_SetBits(GPIOD, LED_PIN);
+  for (int i = 0; i < PAIRING_BURST_COUNT; i++) {
+    // LED blink: 500ms ON (10 loops), 500ms OFF (10 loops)
+    if ((i % 20) < 10)
+      GPIO_ResetBits(GPIOD, LED_PIN); // ON
     else
-      GPIO_ResetBits(GPIOD, LED_PIN);
+      GPIO_SetBits(GPIOD, LED_PIN); // OFF
 
     if (i % 50 == 0) {
-      printf("[PAIR] Sending Req burst %d/500...\r\n", i + 1);
+      printf("[PAIR] Sending Req burst %d/%d...\r\n", i + 1,
+             PAIRING_BURST_COUNT);
     }
 
     nrf24_send(packet, 32);
     Delay_Ms(50); // Fast burst for better pairing (20Hz)
   }
 
-  GPIO_ResetBits(GPIOD, LED_PIN); // LED off after pairing
+  GPIO_SetBits(GPIOD, LED_PIN); // LED off after pairing
   printf("[PAIR] Broadcast complete. Returning to normal mode.\r\n");
 }
 
@@ -181,14 +183,14 @@ int main(void) {
   Delay_Ms(1000);
   printf(" DONE. Millis Diff: %lu ms\r\n", (unsigned long)(millis() - t_start));
 
-  // Boot UI: Double blink
-  GPIO_SetBits(GPIOD, LED_PIN);
-  Delay_Ms(100);
-  GPIO_ResetBits(GPIOD, LED_PIN);
-  Delay_Ms(100);
-  GPIO_SetBits(GPIOD, LED_PIN);
-  Delay_Ms(100);
-  GPIO_ResetBits(GPIOD, LED_PIN);
+  // Boot UI: Triple blink (500ms ON, 500ms OFF)
+  for (int i = 0; i < 3; i++) {
+    GPIO_ResetBits(GPIOD, LED_PIN); // ON
+    Delay_Ms(500);
+    GPIO_SetBits(GPIOD, LED_PIN); // OFF
+    Delay_Ms(500);
+  }
+  GPIO_SetBits(GPIOD, LED_PIN); // Extra safety: ensure LED is OFF
 
   printf("[SYSTEM] Entering Idle Mode. (Hold button for pairing)\r\n");
 
@@ -242,7 +244,7 @@ int main(void) {
              "(3x)...\r\n",
              (unsigned long)seq_num, level, packet[31]);
 
-      GPIO_SetBits(GPIOD, LED_PIN);
+      GPIO_ResetBits(GPIOD, LED_PIN); // ON
       nrf24_power_up_tx();
 
       // BURST: Send 3 times with small gap
@@ -251,7 +253,7 @@ int main(void) {
         Delay_Ms(10);
       }
 
-      GPIO_ResetBits(GPIOD, LED_PIN);
+      // GPIO_SetBits(GPIOD, LED_PIN); // OFF when data send to hub 
 
       last_dispatch = millis();
       seq_num++;

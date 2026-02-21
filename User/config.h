@@ -23,7 +23,8 @@
 
 // Timing
 #define LONG_PRESS_TIME_MS 3000
-#define PAIRING_TIMEOUT_MS 30000
+#define PAIRING_TIME_MINS 2 // Set pairing duration in minutes
+#define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
 #define DATA_SEND_INTERVAL_MS 5000
 
 // Protocol Constants - 3-byte address for pairing
