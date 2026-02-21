@@ -108,7 +108,15 @@ uint16_t generate_new_tank_id(void) {
   return new_id;
 }
 
-/* ========== Pairing Task ========== */
+/* ========== Protocol Checksum ========== */
+uint8_t calculate_checksum(uint8_t *data, uint8_t length) {
+  uint8_t checksum = 0;
+  for (uint8_t i = 0; i < length - 1; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
+
 void run_pairing(void) {
   // Re-initialize radio to ensure we are in a clean state (same as boot)
   nrf24_init();
@@ -126,8 +134,10 @@ void run_pairing(void) {
   packet[3] = 32;
   packet[4] = (g_tank_id & 0xFF); // LSB first
   packet[5] = (g_tank_id >> 8);   // MSB second
+  packet[31] = calculate_checksum(packet, 32);
 
   printf("\r\n[PAIR] Starting DISCOVERY BROADCAST [3-BYTE RAW] (Ch:99)...\r\n");
+  printf("[PAIR] Checksum: 0x%02X\r\n", packet[31]);
   nrf24_power_up_tx();
   nrf24_set_tx_addr(PAIRING_ADDR);
 
@@ -203,29 +213,48 @@ int main(void) {
       pairing_triggered = false;
     }
 
-    // 2. Periodic Data Transmission (Every 10 seconds for now)
+    // 2. Periodic Data Transmission (Every 10 seconds)
     static uint32_t last_dispatch = 0;
+    static uint32_t seq_num = 0;
     if (millis() - last_dispatch > 10000) {
-      // uint8_t level = read_tank_level();
-      uint8_t level = 50;   // temp hai baad mai is ko remove kr na hai
-      uint8_t battery = 85; // Placeholder for battery voltage logic
+      uint8_t level = 50; // temp level
+      uint8_t battery = 85;
 
-      uint8_t packet[32] = {0xAA,
-                            0x55,
-                            0x03,
-                            32,
-                            (uint8_t)(g_tank_id & 0xFF), // LSB
-                            (uint8_t)(g_tank_id >> 8),   // MSB
-                            level,
-                            battery};
+      uint8_t packet[32] = {0};
+      packet[0] = 0xAA; // Sync 0
+      packet[1] = 0x55; // Sync 1
+      packet[2] = 0x03; // PKT_TYPE_TANK_DATA
+      packet[3] = 32;   // Length
+      packet[4] = (uint8_t)(g_tank_id & 0xFF);
+      packet[5] = (uint8_t)(g_tank_id >> 8);
+      packet[6] = level;
+      packet[7] = battery;
 
-      GPIO_SetBits(GPIOD, LED_PIN); // LED on during transmit
+      // Add Sequence Number at index 12 (as per tank_data_packet_t)
+      packet[12] = (uint8_t)(seq_num & 0xFF);
+      packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
+      packet[14] = (uint8_t)((seq_num >> 16) & 0xFF);
+      packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
+
+      packet[31] = calculate_checksum(packet, 32);
+
+      printf("[DATA] Seq:%lu | Level:%d%% | CRC:0x%02X -> Dispatching BURST "
+             "(3x)...\r\n",
+             (unsigned long)seq_num, level, packet[31]);
+
+      GPIO_SetBits(GPIOD, LED_PIN);
       nrf24_power_up_tx();
-      nrf24_send(packet, 32);
-      GPIO_ResetBits(GPIOD, LED_PIN); // LED off
+
+      // BURST: Send 3 times with small gap
+      for (int i = 0; i < 3; i++) {
+        nrf24_send(packet, 32);
+        Delay_Ms(10);
+      }
+
+      GPIO_ResetBits(GPIOD, LED_PIN);
 
       last_dispatch = millis();
-      printf("[DATA] Level: %d%% dispatched.\r\n", level);
+      seq_num++;
     }
 
     Delay_Ms(20);
