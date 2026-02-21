@@ -303,16 +303,22 @@ int main(void) {
   bool pairing_triggered = false;
 
   while (1) {
-    // 1. Button Handling (Pairing Trigger)
+    // 1. Button Handling: 5s = Factory Reset + Auto Pairing
     if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
       if (button_press_start == 0)
         button_press_start = millis();
 
-      // Long press detection (3 seconds)
-      if (!pairing_triggered &&
-          (millis() - button_press_start > LONG_PRESS_TIME_MS)) {
-        printf("[SYSTEM] User trigger: PAIRING MODE\r\n");
-        run_pairing();
+      uint32_t held_ms = millis() - button_press_start;
+
+      // 5s hold -> FACTORY RESET + AUTO PAIRING
+      if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
+        printf("[SYSTEM] *** FACTORY RESET TRIGGERED ***\r\n");
+        g_settings.tank_id = 0;
+        g_settings.pairing_status = 0;
+        flash_save_settings();
+
+        printf("[SYSTEM] Reset done. Starting Pairing automatically...\r\n");
+        run_pairing(); // Auto start pairing after reset
         pairing_triggered = true;
       }
     } else {
