@@ -1,16 +1,49 @@
 #include "ch32v00x.h"
+#include "ch32v00x_flash.h"
 #include "ch32v00x_gpio.h"
 #include "ch32v00x_rcc.h"
 #include "ch32v00x_tim.h"
 #include "config.h"
 #include "debug.h"
 #include "nrf24_simple.h"
+#include <stdint.h>
 #include <string.h>
+
+/* ========== Flash Storage (Last Page 64-byte) ========== */
+#define SETTINGS_FLASH_ADDR 0x08003FC0
+typedef struct {
+  uint16_t tank_id;
+  uint8_t pairing_status; // 1 = Paired, 0 = Not Paired
+} sensor_settings_t;
+
+sensor_settings_t g_settings;
+
+void flash_read_settings(void) {
+  memcpy(&g_settings, (void *)SETTINGS_FLASH_ADDR, sizeof(sensor_settings_t));
+
+  // Check if data is valid (not empty flash 0xFF)
+  if (g_settings.tank_id == 0xFFFF) {
+    g_settings.tank_id = 0;
+    g_settings.pairing_status = 0;
+  }
+}
+
+void flash_save_settings(void) {
+  FLASH_Unlock();
+  FLASH_ErasePage(SETTINGS_FLASH_ADDR);
+
+  uint32_t *pData = (uint32_t *)&g_settings;
+  for (uint16_t i = 0; i < (sizeof(sensor_settings_t) + 3) / 4; i++) {
+    FLASH_ProgramWord(SETTINGS_FLASH_ADDR + (i * 4), pData[i]);
+  }
+  FLASH_Lock();
+  printf("[FLASH] Settings Saved. ID: 0x%04X, Status: %d\r\n",
+         g_settings.tank_id, g_settings.pairing_status);
+}
 
 /* ========== Global Variables ========== */
 const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7, 0xE7}; // 3-byte pairing address
 volatile uint32_t g_millis = 0;
-uint16_t g_tank_id;
 uint32_t g_last_send = 0;
 
 /* ========== TIM2 for millis (1ms) ========== */
@@ -88,6 +121,61 @@ uint8_t read_tank_level(void) {
   return 0; // Empty
 }
 
+/* ========== ADC for Battery Monitoring (PA1) ========== */
+void adc_init(void) {
+  ADC_InitTypeDef ADC_InitStructure = {0};
+  GPIO_InitTypeDef GPIO_InitStructure = {0};
+
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1, ENABLE);
+  RCC_ADCCLKConfig(RCC_PCLK2_Div8);
+
+  GPIO_InitStructure.GPIO_Pin = BATTERY_ADC_PIN;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
+  GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+  ADC_DeInit(ADC1);
+  ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;
+  ADC_InitStructure.ADC_ScanConvMode = DISABLE;
+  ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;
+  ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
+  ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+  ADC_InitStructure.ADC_NbrOfChannel = 1;
+  ADC_Init(ADC1, &ADC_InitStructure);
+
+  ADC_Cmd(ADC1, ENABLE);
+
+  // Calibration
+  ADC_ResetCalibration(ADC1);
+  while (ADC_GetResetCalibrationStatus(ADC1))
+    ;
+  ADC_StartCalibration(ADC1);
+  while (ADC_GetCalibrationStatus(ADC1))
+    ;
+}
+
+uint16_t get_adc_val(uint8_t ch) {
+  ADC_RegularChannelConfig(ADC1, ch, 1, ADC_SampleTime_241Cycles);
+  ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+  while (!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC))
+    ;
+  return ADC_GetConversionValue(ADC1);
+}
+
+uint8_t read_battery_level(void) {
+  // CH32V003 has a 10-bit ADC (0-1023)
+  uint32_t val = get_adc_val(BATTERY_ADC_CHANNEL);
+  printf("Battery ADC: %lu\r\n", (unsigned long)val);
+
+  // Adjusted mapping based on observed values (~187-200)
+  // Let's assume 150 is "Empty" and 250 is "Full" for your current hardware
+  // setup
+  if (val > 250)
+    return 100;
+  if (val < 150)
+    return 0;
+  return (uint8_t)((val - 150) * 100 / 100);
+}
+
 /* ========== Auto-Generate Tank ID ========== */
 uint16_t generate_new_tank_id(void) {
   // Generate a pseudo-random 16-bit ID using current millis
@@ -122,18 +210,24 @@ void run_pairing(void) {
   nrf24_init();
   Delay_Ms(100);
 
-  // Generate new tank ID on every pairing/reset
-  g_tank_id = generate_new_tank_id();
-
-  printf("\r\n[PAIR] Tank ID changed: 0x%04X\r\n", g_tank_id);
+  // Generate a temporary tank ID for this pairing session
+  uint16_t new_id = generate_new_tank_id();
+  // Pairing burst complete, save settings
+  g_settings.tank_id = new_id;
+  g_settings.pairing_status = 1;
+  flash_save_settings();
+  printf("\r\n[PAIR] New Tank ID generated: 0x%04X\r\n", new_id);
 
   uint8_t packet[32] = {0};
   packet[0] = 0xAA;
   packet[1] = 0x55;
   packet[2] = 0x01; // PKT_TYPE_PAIRING_REQ
   packet[3] = 32;
-  packet[4] = (g_tank_id & 0xFF); // LSB first
-  packet[5] = (g_tank_id >> 8);   // MSB second
+  packet[4] = (new_id & 0xFF);      // LSB first
+  packet[5] = (new_id >> 8);        // MSB second
+  packet[6] = 0x10;                 // Firmware version
+  packet[7] = read_battery_level(); // Battery level
+  packet[8] = read_tank_level();    // Current level
   packet[31] = calculate_checksum(packet, 32);
 
   printf("\r\n[PAIR] Starting DISCOVERY BROADCAST for %d min (Ch:99)...\r\n",
@@ -143,7 +237,7 @@ void run_pairing(void) {
   nrf24_set_tx_addr(PAIRING_ADDR);
 
   for (int i = 0; i < PAIRING_BURST_COUNT; i++) {
-    // LED blink: 500ms ON (10 loops), 500ms OFF (10 loops)
+    // LED blink during pairing
     if ((i % 20) < 10)
       GPIO_ResetBits(GPIOD, LED_PIN); // ON
     else
@@ -155,11 +249,11 @@ void run_pairing(void) {
     }
 
     nrf24_send(packet, 32);
-    Delay_Ms(50); // Fast burst for better pairing (20Hz)
+    Delay_Ms(50);
   }
 
-  GPIO_SetBits(GPIOD, LED_PIN); // LED off after pairing
-  printf("[PAIR] Broadcast complete. Returning to normal mode.\r\n");
+  GPIO_SetBits(GPIOD, LED_PIN); // LED off
+  printf("[PAIR] Broadcast complete. Status SAVED. Data will now start.\r\n");
 }
 
 /* ========== Main Loop ========== */
@@ -173,10 +267,21 @@ int main(void) {
 
   timer_init();
   gpio_init();
+  adc_init();
   __enable_irq();
 
   printf("Initializing Radio Hardware...\r\n");
   nrf24_init();
+
+  // Load settings from Flash
+  flash_read_settings();
+
+  if (g_settings.pairing_status == 1) {
+    printf("[SYSTEM] Paired Sensor. Loaded ID: 0x%04X\r\n", g_settings.tank_id);
+    nrf24_set_tx_addr(PAIRING_ADDR); // Ensure address is set
+  } else {
+    printf("[SYSTEM] NOT PAIRED. Waiting for user to trigger pairing...\r\n");
+  }
 
   printf("[SYSTEM] Clock Validation: 1000ms delay...");
   uint32_t t_start = millis();
@@ -218,18 +323,20 @@ int main(void) {
     // 2. Periodic Data Transmission (Every 10 seconds)
     static uint32_t last_dispatch = 0;
     static uint32_t seq_num = 0;
-    if (millis() - last_dispatch > 10000) {
-      uint8_t level = 50; // temp level
-      uint8_t battery = 85;
+
+    // ONLY send data if pairing_status is 1
+    if (g_settings.pairing_status == 1 && (millis() - last_dispatch > 10000)) {
+      uint8_t level = 50; // Hardcoded to 50% for testing as requested
+      uint8_t battery = read_battery_level();
 
       uint8_t packet[32] = {0};
       packet[0] = 0xAA; // Sync 0
       packet[1] = 0x55; // Sync 1
       packet[2] = 0x03; // PKT_TYPE_TANK_DATA
       packet[3] = 32;   // Length
-      packet[4] = (uint8_t)(g_tank_id & 0xFF);
-      packet[5] = (uint8_t)(g_tank_id >> 8);
-      packet[6] = level;
+      packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
+      packet[5] = (uint8_t)(g_settings.tank_id >> 8);
+      packet[6] = 50; // level;
       packet[7] = battery;
 
       // Add Sequence Number at index 12 (as per tank_data_packet_t)
@@ -240,11 +347,13 @@ int main(void) {
 
       packet[31] = calculate_checksum(packet, 32);
 
-      printf("[DATA] Seq:%lu | Level:%d%% | CRC:0x%02X -> Dispatching BURST "
+      printf("[DATA] Seq:%lu | Level:%d%% | battery:%d%% | CRC:0x%02X -> "
+             "Dispatching BURST "
              "(3x)...\r\n",
-             (unsigned long)seq_num, level, packet[31]);
+             (unsigned long)seq_num, level, battery, packet[31]);
 
-      GPIO_ResetBits(GPIOD, LED_PIN); // ON
+      printf("tank_id: 0x%04X\r\n", g_settings.tank_id);
+      // GPIO_ResetBits(GPIOD, LED_PIN); // ON
       nrf24_power_up_tx();
 
       // BURST: Send 3 times with small gap
@@ -253,7 +362,7 @@ int main(void) {
         Delay_Ms(10);
       }
 
-      // GPIO_SetBits(GPIOD, LED_PIN); // OFF when data send to hub 
+      GPIO_SetBits(GPIOD, LED_PIN); // OFF when data send to hub
 
       last_dispatch = millis();
       seq_num++;
