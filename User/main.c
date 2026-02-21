@@ -110,21 +110,24 @@ uint16_t generate_new_tank_id(void) {
 
 /* ========== Pairing Task ========== */
 void run_pairing(void) {
+  // Re-initialize radio to ensure we are in a clean state (same as boot)
+  nrf24_init();
+  Delay_Ms(100);
+
   // Generate new tank ID on every pairing/reset
   g_tank_id = generate_new_tank_id();
 
   printf("\r\n[PAIR] Tank ID changed: 0x%04X\r\n", g_tank_id);
-  printf("\r\n[PAIR] Tank ID changed: %d\r\n", g_tank_id);
 
   uint8_t packet[32] = {0};
   packet[0] = 0xAA;
   packet[1] = 0x55;
-  packet[2] = 0x01;
+  packet[2] = 0x01; // PKT_TYPE_PAIRING_REQ
   packet[3] = 32;
-  packet[4] = (g_tank_id >> 8);
-  packet[5] = (g_tank_id & 0xFF);
+  packet[4] = (g_tank_id & 0xFF); // LSB first
+  packet[5] = (g_tank_id >> 8);   // MSB second
 
-  printf("\r\n[PAIR] Starting DISCOVERY BROACAST [3-BYTE RAW] (Ch:99)...\r\n");
+  printf("\r\n[PAIR] Starting DISCOVERY BROADCAST [3-BYTE RAW] (Ch:99)...\r\n");
   nrf24_power_up_tx();
   nrf24_set_tx_addr(PAIRING_ADDR);
 
@@ -135,19 +138,16 @@ void run_pairing(void) {
     else
       GPIO_ResetBits(GPIOD, LED_PIN);
 
-    if (i % 10 == 0) {
-      printf("[PAIR] Req %d/500: ", i + 1);
+    if (i % 50 == 0) {
+      printf("[PAIR] Sending Req burst %d/500...\r\n", i + 1);
     }
-    if (nrf24_send(packet, 32)) {
-      if (i % 10 == 0)
-        printf("OK\r\n");
-    } else {
-      if (i % 10 == 0)
-        printf("Radio Busy\r\n");
-    }
+
+    nrf24_send(packet, 32);
     Delay_Ms(50); // Fast burst for better pairing (20Hz)
   }
+
   GPIO_ResetBits(GPIOD, LED_PIN); // LED off after pairing
+  printf("[PAIR] Broadcast complete. Returning to normal mode.\r\n");
 }
 
 /* ========== Main Loop ========== */
@@ -214,8 +214,8 @@ int main(void) {
                             0x55,
                             0x03,
                             32,
-                            (uint8_t)(g_tank_id >> 8),
-                            (uint8_t)(g_tank_id & 0xFF),
+                            (uint8_t)(g_tank_id & 0xFF), // LSB
+                            (uint8_t)(g_tank_id >> 8),   // MSB
                             level,
                             battery};
 

@@ -119,47 +119,29 @@ void nrf24_init(void) {
 
   Delay_Ms(150); // Increased settling delay
 
-// Temporarily enable debug for init
-#define INIT_DEBUG 1
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x00 -> VAL 0x02\r\n");
-#endif
-  nrf_write_reg(REG_CONFIG, 0x02); // PWR_UP, NO-CRC, Transmitter
+  // Reset state
+  nrf_write_reg(REG_CONFIG, 0x00); // Power Down
+  Delay_Ms(10);
 
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x01 -> VAL 0x00\r\n");
-#endif
-  nrf_write_reg(REG_EN_AA, 0x00); // RAW LINK: Disable Auto-Ack
-
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x03 -> VAL 0x01\r\n");
-#endif
-  nrf_write_reg(REG_SETUP_AW, 0x01); // 3-byte address (E7 E7 E7)
-
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x04 -> VAL 0x00\r\n");
-#endif
+  nrf_write_reg(REG_CONFIG, 0x02);     // PWR_UP, NO-CRC, Transmitter
+  nrf_write_reg(REG_EN_AA, 0x00);      // RAW LINK: Disable Auto-Ack
+  nrf_write_reg(REG_SETUP_AW, 0x01);   // 3-byte address
   nrf_write_reg(REG_SETUP_RETR, 0x00); // RAW LINK: Disable Retries
+  nrf_write_reg(REG_RF_CH, 99);        // Channel 99
+  nrf_write_reg(REG_RF_SETUP, 0x26);   // 250kbps, 0dBm (MAX POWER)
+  nrf_write_reg(REG_RX_PW_P0, 32);     // Payload 32B
 
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x05 -> VAL 0x63\r\n");
-#endif
-  nrf_write_reg(REG_RF_CH, 99); // Channel 99 - matches receiver
+  // Flag cleaning
+  nrf_write_reg(0x07, 0x70); // Clear all flags
 
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x06 -> VAL 0x26\r\n");
-#endif
-  nrf_write_reg(REG_RF_SETUP, 0x26); // 250kbps, 0dBm (MAX POWER)
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_TX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x11 -> VAL 0x20\r\n");
-#endif
-  nrf_write_reg(REG_RX_PW_P0, 32); // Payload 32B
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_RX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-#if INIT_DEBUG
-  printf("[SPI] WRITE REG 0x07 -> VAL 0x70\r\n");
-#endif
-  nrf_write_reg(0x07, 0x70); // Clear flags
   printf("[RADIO] Hardware Ready (SAFE-RAW).\r\n");
 }
 
@@ -190,21 +172,27 @@ void nrf24_power_up_rx(void) {
 }
 
 bool nrf24_send(uint8_t *data, uint8_t len) {
+  // 1. Clear any pending interrupts and flush TX FIFO
+  nrf_write_reg(0x07, 0x70);
+
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_FLUSH_TX);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
+  // 2. Write Payload
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_W_TX_PL);
   for (uint8_t i = 0; i < 32; i++)
     spi_xfer(i < len ? data[i] : 0);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
+  // 3. Trigger Transmission with a robust pulse
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
-  Delay_Ms(1); // Short pulse for transmission
+  Delay_Ms(5); // Increased to 5ms for 250kbps stability
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
 
-  Delay_Ms(2);               // Small delay for transmission to complete
+  // 4. Wait for transmission to finish and clear flags again
+  Delay_Ms(2);
   nrf_write_reg(0x07, 0x30); // Clear TX_DS and MAX_RT flags
 
   return true;
