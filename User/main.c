@@ -164,7 +164,7 @@ uint16_t get_adc_val(uint8_t ch) {
 uint8_t read_battery_level(void) {
   // CH32V003 has a 10-bit ADC (0-1023)
   uint32_t val = get_adc_val(BATTERY_ADC_CHANNEL);
-  printf("Battery ADC: %lu\r\n", (unsigned long)val);
+  // printf("Battery ADC: %lu\r\n", (unsigned long)val);
 
   // Adjusted mapping based on observed values (~187-200)
   // Let's assume 150 is "Empty" and 250 is "Full" for your current hardware
@@ -326,52 +326,65 @@ int main(void) {
       pairing_triggered = false;
     }
 
-    // 2. Periodic Data Transmission (Every 10 seconds)
+    // 2. Periodic Data Transmission (Change-Based + 4hr Heartbeat)
     static uint32_t last_dispatch = 0;
     static uint32_t seq_num = 0;
+    static uint8_t last_sent_level = 0xFF;   // For change detection
+    static uint8_t last_sent_battery = 0xFF; // For change detection
 
-    // ONLY send data if pairing_status is 1
-    if (g_settings.pairing_status == 1 && (millis() - last_dispatch > 10000)) {
-      uint8_t level = 50; // Hardcoded to 50% for testing as requested
-      uint8_t battery = read_battery_level();
+    // ONLY process if paired
+    if (g_settings.pairing_status == 1) {
+      uint8_t current_level = read_tank_level();
+      uint8_t current_battery = read_battery_level();
+      uint32_t now = millis();
 
-      uint8_t packet[32] = {0};
-      packet[0] = 0xAA; // Sync 0
-      packet[1] = 0x55; // Sync 1
-      packet[2] = 0x03; // PKT_TYPE_TANK_DATA
-      packet[3] = 32;   // Length
-      packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
-      packet[5] = (uint8_t)(g_settings.tank_id >> 8);
-      packet[6] = 50; // level;
-      packet[7] = battery;
+      bool level_changed = (current_level != last_sent_level);
+      bool heartbeat_due = (now - last_dispatch >= HEARTBEAT_INTERVAL_MS);
 
-      // Add Sequence Number at index 12 (as per tank_data_packet_t)
-      packet[12] = (uint8_t)(seq_num & 0xFF);
-      packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
-      packet[14] = (uint8_t)((seq_num >> 16) & 0xFF);
-      packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
+      // Send if: First time OR Level changed OR 4 hours passed
+      if (last_sent_level == 0xFF || level_changed || heartbeat_due) {
 
-      packet[31] = calculate_checksum(packet, 32);
+        uint8_t packet[32] = {0};
+        packet[0] = 0xAA; // Sync 0
+        packet[1] = 0x55; // Sync 1
+        packet[2] = 0x03; // PKT_TYPE_TANK_DATA
+        packet[3] = 32;   // Length
+        packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
+        packet[5] = (uint8_t)(g_settings.tank_id >> 8);
+        packet[6] = current_level;
+        packet[7] = current_battery;
 
-      printf("[DATA] Seq:%lu | Level:%d%% | battery:%d%% | CRC:0x%02X -> "
-             "Dispatching BURST "
-             "(3x)...\r\n",
-             (unsigned long)seq_num, level, battery, packet[31]);
+        // Add Sequence Number
+        packet[12] = (uint8_t)(seq_num & 0xFF);
+        packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
+        packet[14] = (uint8_t)((seq_num >> 16) & 0xFF);
+        packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
 
-      printf("tank_id: 0x%04X\r\n", g_settings.tank_id);
-      // GPIO_ResetBits(GPIOD, LED_PIN); // ON
-      nrf24_power_up_tx();
+        packet[31] = calculate_checksum(packet, 32);
 
-      // BURST: Send 3 times with small gap
-      for (int i = 0; i < 3; i++) {
-        nrf24_send(packet, 32);
-        Delay_Ms(10);
+        printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% | Bat:%d%% -> "
+               "Sending...\r\n",
+               heartbeat_due ? "HEARTBEAT" : "CHANGE", (unsigned long)seq_num,
+               current_level, current_battery);
+
+        nrf24_power_up_tx();
+        // BURST: Send 3 times with small gap
+        for (int i = 0; i < 3; i++) {
+          nrf24_send(packet, 32);
+          Delay_Ms(10);
+        }
+
+        // Update last sent states
+        last_sent_level = current_level;
+        last_sent_battery = current_battery;
+        last_dispatch = now;
+        seq_num++;
+
+        // Blink LED to indicate transmission
+        GPIO_ResetBits(GPIOD, LED_PIN); // ON
+        Delay_Ms(50);
+        GPIO_SetBits(GPIOD, LED_PIN); // OFF
       }
-
-      GPIO_SetBits(GPIOD, LED_PIN); // OFF when data send to hub
-
-      last_dispatch = millis();
-      seq_num++;
     }
 
     Delay_Ms(20);

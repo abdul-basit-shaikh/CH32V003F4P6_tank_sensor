@@ -31,6 +31,10 @@
 #define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
 #define DATA_SEND_INTERVAL_MS 5000
 
+// Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
+#define HEARTBEAT_HOURS 4
+#define HEARTBEAT_INTERVAL_MS (HEARTBEAT_HOURS * 60UL * 60UL * 1000UL)
+
 // Protocol Constants - 3-byte address for pairing
 extern const uint8_t PAIRING_ADDR[3];
 
