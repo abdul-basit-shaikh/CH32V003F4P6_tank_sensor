@@ -173,7 +173,7 @@ uint8_t read_battery_level(void) {
     return 100;
   if (val < 150)
     return 0;
-  return (uint8_t)((val - 150) * 100 / 100);
+  return (uint8_t)((val - 150) * 100 / (250 - 150)); // Divide by 100 (range)
 }
 
 /* ========== Auto-Generate Tank ID ========== */

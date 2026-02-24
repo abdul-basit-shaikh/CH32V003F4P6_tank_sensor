@@ -26,8 +26,7 @@
 #define BATTERY_ADC_CHANNEL ADC_Channel_1
 
 // Timing
-#define LONG_PRESS_TIME_MS 3000  // 3s  -> Pairing
-#define RESET_PRESS_TIME_MS 5000 // 5s  -> Factory Reset (Un-pair)
+#define RESET_PRESS_TIME_MS 5000 // 5s  -> Factory Reset (Un-pair) Pairing
 #define PAIRING_TIME_MINS 1      // Set pairing duration in minutes
 #define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
 #define DATA_SEND_INTERVAL_MS 5000
