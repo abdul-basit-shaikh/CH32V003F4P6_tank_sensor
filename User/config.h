@@ -35,6 +35,12 @@
 #define HEARTBEAT_HOURS 4
 #define HEARTBEAT_INTERVAL_MS (HEARTBEAT_HOURS * 60UL * 60UL * 1000UL)
 
+// Deep Sleep Settings
+#define STAY_AWAKE_MS 60000 // 1 minute stay awake after activity
+#define AWU_SLEEP_SEC 30    // AWU wake up interval in seconds (~30s)
+// Calculate how many sleep cycles = 4 hours
+#define HEARTBEAT_CYCLES ((HEARTBEAT_HOURS * 3600) / AWU_SLEEP_SEC)
+
 // Protocol Constants - 3-byte address for pairing
 extern const uint8_t PAIRING_ADDR[3];
 

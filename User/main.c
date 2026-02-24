@@ -1,13 +1,114 @@
 #include "ch32v00x.h"
+#include "ch32v00x_exti.h"
 #include "ch32v00x_flash.h"
 #include "ch32v00x_gpio.h"
+#include "ch32v00x_misc.h"
+#include "ch32v00x_pwr.h"
 #include "ch32v00x_rcc.h"
 #include "ch32v00x_tim.h"
+#include "ch32v00x_usart.h"
 #include "config.h"
 #include "debug.h"
 #include "nrf24_simple.h"
 #include <stdint.h>
 #include <string.h>
+
+/* ========== Power Management & AWU ========== */
+void pwr_sleep_init(void) {
+  // Enable PWR clock
+  RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
+
+  // Configure AWU (Auto Wake-up)
+  RCC_LSICmd(ENABLE);
+  while (RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET)
+    ;
+
+  // Set AWU prescaler and window for ~30s wake-up
+  PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
+  PWR_AWU_SetWindowValue(20);
+  PWR_AutoWakeUpCmd(ENABLE);
+
+  // Enable AWU interrupt in NVIC
+  NVIC_InitTypeDef NVIC_InitStructure = {0};
+  NVIC_InitStructure.NVIC_IRQChannel = AWU_IRQn;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+  NVIC_Init(&NVIC_InitStructure);
+}
+
+void AWU_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void AWU_IRQHandler(void) {
+  // AWU does not have a specific IT pending bit to clear in most V003 versions,
+  // it's cleared by hardware or by the wake-up process.
+}
+
+void exti_init(void) {
+  // Enable AFIO clock BEFORE configuring line mapping
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+
+  EXTI_InitTypeDef EXTI_InitStructure = {0};
+
+  // Sensor Pins on Port C: PC0, PC1, PC2, PC4
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource0);
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource1);
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource2);
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource4);
+
+  EXTI_InitStructure.EXTI_Line =
+      EXTI_Line0 | EXTI_Line1 | EXTI_Line2 | EXTI_Line4;
+  EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising_Falling;
+  EXTI_InitStructure.EXTI_LineCmd = ENABLE;
+  EXTI_Init(&EXTI_InitStructure);
+
+  // Button Pin on Port D: PD6
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOD, GPIO_PinSource6);
+  EXTI_InitStructure.EXTI_Line = EXTI_Line6;
+  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
+  EXTI_Init(&EXTI_InitStructure);
+
+  // Enable NVIC for EXTI Line 7-0
+  NVIC_InitTypeDef NVIC_InitStructure = {0};
+  NVIC_InitStructure.NVIC_IRQChannel = EXTI7_0_IRQn;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+  NVIC_Init(&NVIC_InitStructure);
+}
+
+void EXTI7_0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void EXTI7_0_IRQHandler(void) {
+  // Clear all pending flags for sensor pins and button
+  EXTI_ClearITPendingBit(EXTI_Line0 | EXTI_Line1 | EXTI_Line2 | EXTI_Line4 |
+                         EXTI_Line6);
+}
+
+void enter_deep_sleep(void) {
+  printf("[PWR] Entering Deep Sleep...\r\n");
+  Delay_Ms(50); // Increased UART flush time
+
+  // Clear pending flags for a clean start
+  EXTI->INTFR = 0xFFFFFFFF;
+
+  // Use "Stop" mode (SLEEPDEEP=1, PDDS=0)
+  // This mode allows EXTI (Sensor changes) to wake up the MCU
+  PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
+  NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
+
+  __WFI(); // Wait for Interrupt (AWU or EXTI)
+
+  NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP after wakeup
+
+  // System resumes here after wake up
+  SystemCoreClockUpdate();
+
+  // Clear flags again after waking to prevent fast loops
+  EXTI->INTFR = 0xFFFFFFFF;
+
+  printf("[PWR] Woke UP.\r\n");
+  Delay_Ms(2000); // More stabilization delay after wake up
+}
 
 /* ========== Flash Storage (Last Page 64-byte) ========== */
 #define SETTINGS_FLASH_ADDR 0x08003FC0
@@ -102,6 +203,9 @@ void gpio_init(void) {
       SENSOR_PIN_25 | SENSOR_PIN_50 | SENSOR_PIN_75 | SENSOR_PIN_100;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
   GPIO_Init(GPIOC, &GPIO_InitStructure);
+
+  // Initialize EXTI for these pins
+  exti_init();
 }
 
 /* ========== Sensor Reading ========== */
@@ -268,10 +372,19 @@ int main(void) {
   timer_init();
   gpio_init();
   adc_init();
+  pwr_sleep_init();
+
+  // SAFETY: Delay at boot to allow WCH-Link to connect before MCU sleeps.
+  // This is the most reliable way to prevent "Lockout" during development.
+  printf("[SYSTEM] Safety Delay (5s) for Flashing... ");
+  Delay_Ms(5000);
+  printf("Ready.\r\n");
+
   __enable_irq();
 
   printf("Initializing Radio Hardware...\r\n");
   nrf24_init();
+  nrf24_power_down(); // Start in low power mode
 
   // Load settings from Flash
   flash_read_settings();
@@ -301,49 +414,43 @@ int main(void) {
 
   uint32_t button_press_start = 0;
   bool pairing_triggered = false;
+  uint16_t sleep_cycle_count = 0;
 
   while (1) {
-    // 1. Button Handling: 5s = Factory Reset + Auto Pairing
+    // 1. Button Handling (Stay awake during press)
     if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
       if (button_press_start == 0)
         button_press_start = millis();
 
       uint32_t held_ms = millis() - button_press_start;
-
-      // 5s hold -> FACTORY RESET + AUTO PAIRING
       if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
         printf("[SYSTEM] *** FACTORY RESET TRIGGERED ***\r\n");
         g_settings.tank_id = 0;
         g_settings.pairing_status = 0;
         flash_save_settings();
-
-        printf("[SYSTEM] Reset done. Starting Pairing automatically...\r\n");
-        run_pairing(); // Auto start pairing after reset
+        run_pairing();
         pairing_triggered = true;
       }
+      Delay_Ms(10);
+      continue; // Don't sleep while button is held
     } else {
       button_press_start = 0;
       pairing_triggered = false;
     }
 
-    // 2. Periodic Data Transmission (Change-Based + 4hr Heartbeat)
-    static uint32_t last_dispatch = 0;
+    // 2. Periodic Data Transmission (Change-Based + Heartbeat via Sleep Cycles)
     static uint32_t seq_num = 0;
-    static uint8_t last_sent_level = 0xFF;   // For change detection
-    static uint8_t last_sent_battery = 0xFF; // For change detection
+    static uint8_t last_sent_level = 0xFF;
 
-    // ONLY process if paired
     if (g_settings.pairing_status == 1) {
       uint8_t current_level = read_tank_level();
       uint8_t current_battery = read_battery_level();
-      uint32_t now = millis();
 
       bool level_changed = (current_level != last_sent_level);
-      bool heartbeat_due = (now - last_dispatch >= HEARTBEAT_INTERVAL_MS);
+      bool heartbeat_due = (sleep_cycle_count >= HEARTBEAT_CYCLES);
 
       // Send if: First time OR Level changed OR 4 hours passed
       if (last_sent_level == 0xFF || level_changed || heartbeat_due) {
-
         uint8_t packet[32] = {0};
         packet[0] = 0xAA; // Sync 0
         packet[1] = 0x55; // Sync 1
@@ -364,29 +471,43 @@ int main(void) {
 
         printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% | Bat:%d%% -> "
                "Sending...\r\n",
-               heartbeat_due ? "HEARTBEAT" : "CHANGE", (unsigned long)seq_num,
-               current_level, current_battery);
+               heartbeat_due ? "HEARTBEAT"
+                             : (level_changed ? "CHANGE" : "BOOT"),
+               (unsigned long)seq_num, current_level, current_battery);
 
         nrf24_power_up_tx();
+        Delay_Ms(50); // Give radio more time to stabilize crystal
         // BURST: Send 3 times with small gap
         for (int i = 0; i < 3; i++) {
           nrf24_send(packet, 32);
-          Delay_Ms(10);
+          Delay_Ms(20); // Extra delay between re-transmissions
         }
 
-        // Update last sent states
+        // Wait for radio to actually finish transmitting before powering it
+        // down
+        Delay_Ms(200);
+
         last_sent_level = current_level;
-        last_sent_battery = current_battery;
-        last_dispatch = now;
+        sleep_cycle_count = 0; // Reset heartbeat counter
         seq_num++;
 
-        // Blink LED to indicate transmission
+        nrf24_power_down();
+
         GPIO_ResetBits(GPIOD, LED_PIN); // ON
         Delay_Ms(50);
         GPIO_SetBits(GPIOD, LED_PIN); // OFF
       }
+    } else {
+      printf("[SYSTEM] Not paired, sleeping...\r\n");
+      Delay_Ms(100);
     }
 
-    Delay_Ms(20);
+    // 3. Enter Deep Sleep
+    if (g_settings.pairing_status == 1) {
+      printf("[SYSTEM] Task Done. Going to Deep Sleep...\r\n");
+      printf("------------------------------------------\r\n");
+    }
+    enter_deep_sleep();
+    sleep_cycle_count++; // Increment cycles on each AWU wake
   }
 }
