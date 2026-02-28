@@ -517,16 +517,21 @@ int main(void) {
   uint8_t current_battery = 0;
 
   while (1) {
-    // 1. Button Handling (Stay awake during press)
+    // 1. Button Handling
     if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
-      if (button_press_start == 0)
+      if (button_press_start == 0) {
         button_press_start = millis();
+        printf("[SYSTEM] Button Pressed...\r\n");
+      }
 
       uint32_t held_ms = millis() - button_press_start;
-      if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
-        printf("[SYSTEM] *** FACTORY RESET TRIGGERED ***\r\n");
 
-        // --- NEW: Sync Unpair with Receiver ---
+      // --- FACTORY RESET (Long Press >= 5s) ---
+      if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
+        printf("[SYSTEM] *** FACTORY RESET TRIGGERED (Long Press) ***\r\n");
+        pairing_triggered = true;
+
+        // Sync Unpair with Receiver before reset
         if (g_settings.pairing_status == 1 && g_settings.tank_id != 0) {
           printf("[PWR] Sending UNPAIR packet to receiver before reset...\r\n");
           uint8_t unpair_pkt[32] = {0};
@@ -540,7 +545,7 @@ int main(void) {
 
           nrf24_power_up_tx();
           nrf24_set_tx_addr(PAIRING_ADDR);
-          for (int i = 0; i < 20; i++) { // Send 10 times to ensure delivery
+          for (int i = 0; i < 20; i++) {
             nrf24_send(unpair_pkt, 32);
             Delay_Ms(30);
           }
@@ -551,19 +556,35 @@ int main(void) {
         g_settings.pairing_status = 0;
         flash_save_settings();
 
-        // Reset local trackers after factory reset/pairing
+        // Reset local trackers
         seq_num = 0;
         last_sent_level = 0xFF;
         first_reading_done = false;
 
-        run_pairing();
-        pairing_triggered = true;
+        run_pairing(); // Enters pairing mode broadcast for 30s
       }
       Delay_Ms(10);
       continue; // Don't sleep while button is held
     } else {
-      button_press_start = 0;
-      pairing_triggered = false;
+      // Button Released
+      if (button_press_start != 0) {
+        uint32_t held_ms = millis() - button_press_start;
+
+        // --- RESTART (Single Click < 5s) ---
+        if (!pairing_triggered && held_ms > 10 &&
+            held_ms < RESET_PRESS_TIME_MS) {
+          printf("[SYSTEM] Single Click (%lu ms) -> Restarting Device...\r\n",
+                 (unsigned long)held_ms);
+
+          Delay_Ms(100);
+
+          // Software System Reset
+          NVIC->SCTLR |= (1 << 31); // SYSRESETREQ (Bit 31)
+        }
+
+        button_press_start = 0;
+        pairing_triggered = false;
+      }
     }
 
     if (g_settings.pairing_status == 1) {
