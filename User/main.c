@@ -223,7 +223,26 @@ void gpio_init(void) {
   exti_init();
 }
 
-// ========== Sensor Reading with Triple-Sampling & Debugging ========== */
+/**
+ * @brief Reads all tank probes and applies a software patch for hardware
+ * reliability.
+ *
+ * LOGIC EXPLANATION (Hardware Patch):
+ * In a standard water tank, if a higher probe (e.g., 50%) is touching water,
+ * all probes below it (e.g., 25%) MUST also be touching water.
+ * If a lower probe wire is broken or the probe is oxidized, it might
+ * report "Dry" even when the tank is half full.
+ *
+ * This function fixes that:
+ * 1. It reads physical pin states (PC0, PC1, PC2, PC4).
+ * 2. If it detects water at a level 'X', it automatically marks all levels
+ *    BELOW 'X' as "Wet" in software.
+ *
+ * Benefit: Prevents "jumpy" or incorrect readings (like 0% -> 50% -> 0%)
+ * caused by faulty lower wiring.
+ *
+ * @return uint8_t Current water level (0, 25, 50, 75, or 100)
+ */
 uint8_t read_internal_probes(void) {
   GPIO_InitTypeDef GPIO_InitStructure = {0};
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
@@ -550,28 +569,25 @@ int main(void) {
     if (g_settings.pairing_status == 1) {
       uint8_t raw_level = read_tank_level();
 
-      // Skip processing if sensor reports an ERROR state
-      if (raw_level != SENSOR_ERROR_VAL) {
-        // --- Water Ripple Filter (Stable Level) ---
-        if (!first_reading_done) {
-          // First time after boot: Bypass filter to show instant result
-          filtered_level = raw_level;
-          first_reading_done = true;
-          stable_counter = 0;
-          printf("[SYSTEM] Initial Level Detected: %d%%\r\n", filtered_level);
+      // --- Water Ripple Filter (Stable Level) ---
+      if (!first_reading_done) {
+        // First time after boot: Bypass filter to show instant result
+        filtered_level = raw_level;
+        first_reading_done = true;
+        stable_counter = 0;
+        printf("[SYSTEM] Initial Level Detected: %d%%\r\n", filtered_level);
+      } else {
+        // In Sleep Mode, we want faster updates.
+        // If level changed, we only wait 1 cycle (approx 10s)
+        if (raw_level == filtered_level) {
+          stable_counter = 0; // Already stable
         } else {
-          // In Sleep Mode, we want faster updates.
-          // If level changed, we only wait 1 cycle (approx 10s)
-          if (raw_level == filtered_level) {
-            stable_counter = 0; // Already stable
-          } else {
-            stable_counter++;
-            if (stable_counter >= 1) { // INSTANT UPDATE (1 cycle only)
-              filtered_level = raw_level;
-              stable_counter = 0;
-              printf("[SYSTEM] Level Changed & Confirmed: %d%%\r\n",
-                     filtered_level);
-            }
+          stable_counter++;
+          if (stable_counter >= 1) { // INSTANT UPDATE (1 cycle only)
+            filtered_level = raw_level;
+            stable_counter = 0;
+            printf("[SYSTEM] Level Changed & Confirmed: %d%%\r\n",
+                   filtered_level);
           }
         }
       }
@@ -605,8 +621,6 @@ int main(void) {
         packet[8] = 0;
         if (current_battery <= BATTERY_LOW_THRESHOLD)
           packet[8] |= 0x01;
-        if (raw_level == SENSOR_ERROR_VAL)
-          packet[8] |= 0x02;
 
         packet[12] = (uint8_t)(seq_num & 0xFF);
         packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
@@ -614,7 +628,8 @@ int main(void) {
         packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
         packet[31] = calculate_checksum(packet, 32);
 
-        printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% current_battery : %d%% -> SENDING (POWER "
+        printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% current_battery : %d%% "
+               "-> SENDING (POWER "
                "MAX)...\r\n",
                level_changed ? "CHANGE" : "HEARTBEAT", (unsigned long)seq_num,
                current_level, current_battery);

@@ -22,7 +22,6 @@
 #define SENSOR_PIN_100 GPIO_Pin_4 // PC4
 
 // Sensor Logic Constants
-#define SENSOR_STABLE_COUNT 2 // 2 cycles x 15s = 30s total stability
 #define BATTERY_LOW_THRESHOLD 15
 #define SENSOR_ERROR_VAL 0xFE
 
@@ -51,10 +50,8 @@
 #define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
 
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
-#define HEARTBEAT_HOURS 4
-#define HEARTBEAT_INTERVAL_MS (HEARTBEAT_HOURS * 60UL * 60UL * 1000UL)
-
 // Deep Sleep Settings
+#define HEARTBEAT_HOURS 4
 #define AWU_SLEEP_SEC 15 // Wake up every 15 seconds
 #define HEARTBEAT_CYCLES ((HEARTBEAT_HOURS * 3600) / AWU_SLEEP_SEC)
 
