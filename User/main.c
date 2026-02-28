@@ -23,9 +23,9 @@ void pwr_sleep_init(void) {
   while (RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET)
     ;
 
-  // Set AWU prescaler and window for ~30s wake-up
+  // Set AWU prescaler and window for ~10s wake-up (Faster response)
   PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
-  PWR_AWU_SetWindowValue(20);
+  PWR_AWU_SetWindowValue(8);
   PWR_AutoWakeUpCmd(ENABLE);
 
   // Enable AWU interrupt in NVIC
@@ -107,7 +107,22 @@ void enter_deep_sleep(void) {
   EXTI->INTFR = 0xFFFFFFFF;
 
   printf("[PWR] Woke UP.\r\n");
-  Delay_Ms(2000); // More stabilization delay after wake up
+
+  // Visual confirmation of wakeup
+  GPIO_ResetBits(GPIOD, LED_PIN); // Blink ON
+  Delay_Ms(50);
+  GPIO_SetBits(GPIOD, LED_PIN); // Blink OFF
+
+  // Essential re-init after deep sleep
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD | RCC_APB2Periph_GPIOC |
+                             RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1 |
+                             RCC_APB2Periph_AFIO,
+                         ENABLE);
+  gpio_init(); // Re-init all GPIO modes correctly
+  adc_init();  // Re-calibrate ADC after wake up
+  exti_init(); // Re-enable EXTI wake triggers
+
+  Delay_Ms(200); // Stabilization delay
 }
 
 /* ========== Flash Storage (Last Page 64-byte) ========== */
@@ -208,21 +223,65 @@ void gpio_init(void) {
   exti_init();
 }
 
-/* ========== Sensor Reading ========== */
-uint8_t read_tank_level(void) {
-  // Logic: Probes are pulled HIGH by internal resistors.
-  // When water touches a probe, it shorts to GND (Common), pulling the pin LOW.
+// ========== Sensor Reading with Triple-Sampling & Debugging ========== */
+uint8_t read_internal_probes(void) {
+  GPIO_InitTypeDef GPIO_InitStructure = {0};
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
 
-  if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0)
+  GPIO_InitStructure.GPIO_Pin =
+      SENSOR_PIN_25 | SENSOR_PIN_50 | SENSOR_PIN_75 | SENSOR_PIN_100;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
+  GPIO_Init(GPIOC, &GPIO_InitStructure);
+
+  Delay_Ms(50); // Increased settling time
+
+  uint8_t p25 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0);
+  uint8_t p50 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0);
+  uint8_t p75 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0);
+  uint8_t p100 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0);
+
+  // --- HARDWARE PATCH: Broken Wire Fix ---
+  // If a higher probe is wet, all lower ones MUST be wet.
+  if (p100) {
+    p75 = 1;
+    p50 = 1;
+    p25 = 1;
+  } else if (p75) {
+    p50 = 1;
+    p25 = 1;
+  } else if (p50) {
+    p25 = 1;
+  }
+
+  // DEBUG: Raw probe state after patch
+  printf("[DEBUG] Probes: 100:%d 75:%d 50:%d 25:%d\r\n", p100, p75, p50, p25);
+
+  if (p100)
     return 100;
-  if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0)
+  if (p75)
     return 75;
-  if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0)
+  if (p50)
     return 50;
-  if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0)
+  if (p25)
     return 25;
+  return 0;
+}
 
-  return 0; // Empty
+uint8_t read_tank_level(void) {
+  uint8_t r1 = read_internal_probes();
+  uint8_t r2 = read_internal_probes();
+  uint8_t r3 = read_internal_probes();
+
+  // Aggressive Detection: Highest level found in any sample
+  uint8_t best = r1;
+  if (r2 > best)
+    best = r2;
+  if (r3 > best)
+    best = r3;
+
+  if (best > 0)
+    printf("[DEBUG] Tank Level Detected: %d%%\r\n", best);
+  return best;
 }
 
 /* ========== ADC for Battery Monitoring (PA1) ========== */
@@ -266,18 +325,38 @@ uint16_t get_adc_val(uint8_t ch) {
 }
 
 uint8_t read_battery_level(void) {
-  // CH32V003 has a 10-bit ADC (0-1023)
-  uint32_t val = get_adc_val(BATTERY_ADC_CHANNEL);
-  // printf("Battery ADC: %lu\r\n", (unsigned long)val);
+  // 1. Get Internal Reference (1.2V) to calculate actual VDD
+  uint32_t vref_sum = 0;
+  for (int i = 0; i < 16; i++)
+    vref_sum += get_adc_val(ADC_Channel_Vrefint);
+  uint16_t vref_raw = vref_sum / 16;
 
-  // Adjusted mapping based on observed values (~187-200)
-  // Let's assume 150 is "Empty" and 250 is "Full" for your current hardware
-  // setup
-  if (val > 250)
+  if (vref_raw == 0)
+    return 0; // Guard against division by zero
+
+  // 2. Get Battery Pin Voltage (PA1)
+  uint32_t bat_sum = 0;
+  for (int i = 0; i < 16; i++)
+    bat_sum += get_adc_val(BATTERY_ADC_CHANNEL);
+  uint16_t bat_raw = bat_sum / 16;
+
+  // 3. Calculate Battery Voltage using the Universal Formula:
+  // V_bat = (ADC_bat * 1.2V * (R_up + R_down)) / (ADC_vref * R_down)
+  // We use floats for precision during calibration phase
+  float ratio = (BAT_RESISTOR_UP + BAT_RESISTOR_DOWN) / BAT_RESISTOR_DOWN;
+  float v_bat = ((float)bat_raw * 1.2f * ratio) / (float)vref_raw;
+
+  printf("[BAT] Actual Voltage: %d.%02dV\r\n", (int)v_bat,
+         (int)(v_bat * 100) % 100);
+
+  // 4. Map to Percentage
+  if (v_bat >= BAT_MAX_VOLTS)
     return 100;
-  if (val < 150)
+  if (v_bat <= BAT_MIN_VOLTS)
     return 0;
-  return (uint8_t)((val - 150) * 100 / (250 - 150)); // Divide by 100 (range)
+
+  return (uint8_t)((v_bat - BAT_MIN_VOLTS) * 100.0f /
+                   (BAT_MAX_VOLTS - BAT_MIN_VOLTS));
 }
 
 /* ========== Auto-Generate Tank ID ========== */
@@ -300,63 +379,57 @@ uint16_t generate_new_tank_id(void) {
   return new_id;
 }
 
-/* ========== Protocol Checksum ========== */
+/* ========== Protocol Checksum (CRC-8) ========== */
 uint8_t calculate_checksum(uint8_t *data, uint8_t length) {
-  uint8_t checksum = 0;
+  uint8_t crc = 0x00;
   for (uint8_t i = 0; i < length - 1; i++) {
-    checksum ^= data[i];
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x80)
+        crc = (crc << 1) ^ 0x07; // Polynomial 0x07
+      else
+        crc <<= 1;
+    }
   }
-  return checksum;
+  return crc;
 }
 
 void run_pairing(void) {
-  // Re-initialize radio to ensure we are in a clean state (same as boot)
   nrf24_init();
   Delay_Ms(100);
 
-  // Generate a temporary tank ID for this pairing session
   uint16_t new_id = generate_new_tank_id();
-  // Pairing burst complete, save settings
   g_settings.tank_id = new_id;
   g_settings.pairing_status = 1;
   flash_save_settings();
-  printf("\r\n[PAIR] New Tank ID generated: 0x%04X\r\n", new_id);
+  printf("\r\n[PAIR] New Tank ID: 0x%04X\r\n", new_id);
 
   uint8_t packet[32] = {0};
   packet[0] = 0xAA;
   packet[1] = 0x55;
   packet[2] = 0x01; // PKT_TYPE_PAIRING_REQ
   packet[3] = 32;
-  packet[4] = (new_id & 0xFF);      // LSB first
-  packet[5] = (new_id >> 8);        // MSB second
-  packet[6] = 0x10;                 // Firmware version
-  packet[7] = read_battery_level(); // Battery level
-  packet[8] = read_tank_level();    // Current level
+  packet[4] = (new_id & 0xFF);
+  packet[5] = (new_id >> 8);
+  packet[6] = read_tank_level();    // Fixed: Level at index 6
+  packet[7] = read_battery_level(); // Fixed: Battery at index 7
+  packet[8] = 0x10;                 // Version at index 8
   packet[31] = calculate_checksum(packet, 32);
 
-  printf("\r\n[PAIR] Starting DISCOVERY BROADCAST for %d min (Ch:99)...\r\n",
-         PAIRING_TIME_MINS);
-  printf("[PAIR] Checksum: 0x%02X\r\n", packet[31]);
+  printf("[PAIR] Broadcasting for 30s...\r\n");
   nrf24_power_up_tx();
   nrf24_set_tx_addr(PAIRING_ADDR);
 
-  for (int i = 0; i < PAIRING_BURST_COUNT; i++) {
-    // LED blink during pairing
-    if ((i % 20) < 10)
-      GPIO_ResetBits(GPIOD, LED_PIN); // ON
+  for (int i = 0; i < 600; i++) { // 30s broadcast
+    if ((i % 10) < 5)
+      GPIO_ResetBits(GPIOD, LED_PIN);
     else
-      GPIO_SetBits(GPIOD, LED_PIN); // OFF
-
-    if (i % 50 == 0) {
-      printf("[PAIR] Sending Req burst %d/%d...\r\n", i + 1,
-             PAIRING_BURST_COUNT);
-    }
-
+      GPIO_SetBits(GPIOD, LED_PIN);
     nrf24_send(packet, 32);
     Delay_Ms(50);
   }
 
-  GPIO_SetBits(GPIOD, LED_PIN); // LED off
+  GPIO_SetBits(GPIOD, LED_PIN);
   printf("[PAIR] Broadcast complete. Status SAVED. Data will now start.\r\n");
 }
 
@@ -416,6 +489,14 @@ int main(void) {
   bool pairing_triggered = false;
   uint16_t sleep_cycle_count = 0;
 
+  // Trackers (Must be reset on pairing)
+  uint32_t seq_num = 0;
+  uint8_t last_sent_level = 0xFF;
+  uint8_t filtered_level = 0;
+  uint8_t stable_counter = 0;
+  bool first_reading_done = false;
+  uint8_t current_battery = 0;
+
   while (1) {
     // 1. Button Handling (Stay awake during press)
     if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
@@ -425,9 +506,37 @@ int main(void) {
       uint32_t held_ms = millis() - button_press_start;
       if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
         printf("[SYSTEM] *** FACTORY RESET TRIGGERED ***\r\n");
+
+        // --- NEW: Sync Unpair with Receiver ---
+        if (g_settings.pairing_status == 1 && g_settings.tank_id != 0) {
+          printf("[PWR] Sending UNPAIR packet to receiver before reset...\r\n");
+          uint8_t unpair_pkt[32] = {0};
+          unpair_pkt[0] = 0xAA;
+          unpair_pkt[1] = 0x55;
+          unpair_pkt[2] = 0x06; // PKT_TYPE_UNPAIR
+          unpair_pkt[3] = 32;
+          unpair_pkt[4] = (uint8_t)(g_settings.tank_id & 0xFF);
+          unpair_pkt[5] = (uint8_t)(g_settings.tank_id >> 8);
+          unpair_pkt[31] = calculate_checksum(unpair_pkt, 32);
+
+          nrf24_power_up_tx();
+          nrf24_set_tx_addr(PAIRING_ADDR);
+          for (int i = 0; i < 20; i++) { // Send 10 times to ensure delivery
+            nrf24_send(unpair_pkt, 32);
+            Delay_Ms(30);
+          }
+          nrf24_power_down();
+        }
+
         g_settings.tank_id = 0;
         g_settings.pairing_status = 0;
         flash_save_settings();
+
+        // Reset local trackers after factory reset/pairing
+        seq_num = 0;
+        last_sent_level = 0xFF;
+        first_reading_done = false;
+
         run_pairing();
         pairing_triggered = true;
       }
@@ -438,54 +547,93 @@ int main(void) {
       pairing_triggered = false;
     }
 
-    // 2. Periodic Data Transmission (Change-Based + Heartbeat via Sleep Cycles)
-    static uint32_t seq_num = 0;
-    static uint8_t last_sent_level = 0xFF;
-
     if (g_settings.pairing_status == 1) {
-      uint8_t current_level = read_tank_level();
-      uint8_t current_battery = read_battery_level();
+      uint8_t raw_level = read_tank_level();
 
+      // Skip processing if sensor reports an ERROR state
+      if (raw_level != SENSOR_ERROR_VAL) {
+        // --- Water Ripple Filter (Stable Level) ---
+        if (!first_reading_done) {
+          // First time after boot: Bypass filter to show instant result
+          filtered_level = raw_level;
+          first_reading_done = true;
+          stable_counter = 0;
+          printf("[SYSTEM] Initial Level Detected: %d%%\r\n", filtered_level);
+        } else {
+          // In Sleep Mode, we want faster updates.
+          // If level changed, we only wait 1 cycle (approx 10s)
+          if (raw_level == filtered_level) {
+            stable_counter = 0; // Already stable
+          } else {
+            stable_counter++;
+            if (stable_counter >= 1) { // INSTANT UPDATE (1 cycle only)
+              filtered_level = raw_level;
+              stable_counter = 0;
+              printf("[SYSTEM] Level Changed & Confirmed: %d%%\r\n",
+                     filtered_level);
+            }
+          }
+        }
+      }
+
+      uint8_t current_level = filtered_level;
       bool level_changed = (current_level != last_sent_level);
       bool heartbeat_due = (sleep_cycle_count >= HEARTBEAT_CYCLES);
 
+      // --- Battery Internal Logic ---
+      if (last_sent_level == 0xFF || heartbeat_due) {
+        current_battery = read_battery_level();
+        printf("[BAT] Battery level: %d%%\r\n", current_battery);
+        Delay_Ms(100); // stabilize battery reading
+      }
+
       // Send if: First time OR Level changed OR 4 hours passed
       if (last_sent_level == 0xFF || level_changed || heartbeat_due) {
-        uint8_t packet[32] = {0};
-        packet[0] = 0xAA; // Sync 0
-        packet[1] = 0x55; // Sync 1
-        packet[2] = 0x03; // PKT_TYPE_TANK_DATA
-        packet[3] = 32;   // Length
+        uint8_t packet[32];
+        for (int i = 0; i < 32; i++)
+          packet[i] = 0; // Absolute Zero-Fill
+
+        packet[0] = 0xAA;
+        packet[1] = 0x55;
+        packet[2] = 0x02;
+        packet[3] = 32;
         packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
         packet[5] = (uint8_t)(g_settings.tank_id >> 8);
         packet[6] = current_level;
-        packet[7] = current_battery;
+        packet[7] = (uint8_t)current_battery;
 
-        // Add Sequence Number
+        packet[8] = 0;
+        if (current_battery <= BATTERY_LOW_THRESHOLD)
+          packet[8] |= 0x01;
+        if (raw_level == SENSOR_ERROR_VAL)
+          packet[8] |= 0x02;
+
         packet[12] = (uint8_t)(seq_num & 0xFF);
         packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
         packet[14] = (uint8_t)((seq_num >> 16) & 0xFF);
         packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
-
         packet[31] = calculate_checksum(packet, 32);
 
-        printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% | Bat:%d%% -> "
-               "Sending...\r\n",
-               heartbeat_due ? "HEARTBEAT"
-                             : (level_changed ? "CHANGE" : "BOOT"),
-               (unsigned long)seq_num, current_level, current_battery);
+        printf("[DATA] Reason: %s | Seq:%lu | Lvl:%d%% current_battery : %d%% -> SENDING (POWER "
+               "MAX)...\r\n",
+               level_changed ? "CHANGE" : "HEARTBEAT", (unsigned long)seq_num,
+               current_level, current_battery);
 
+        // --- POWERFUL RADIO RE-INIT ---
+        nrf24_init(); // Reset state
         nrf24_power_up_tx();
-        Delay_Ms(50); // Give radio more time to stabilize crystal
-        // BURST: Send 3 times with small gap
-        for (int i = 0; i < 3; i++) {
+        nrf24_set_tx_addr(PAIRING_ADDR);
+
+        Delay_Ms(
+            200); // Wait for frequency to be rock solid (Crucial for Low Bat)
+
+        // Burst send 10 times to ensure delivery
+        for (int i = 0; i < 10; i++) {
           nrf24_send(packet, 32);
-          Delay_Ms(20); // Extra delay between re-transmissions
+          Delay_Ms(30);
         }
 
-        // Wait for radio to actually finish transmitting before powering it
-        // down
-        Delay_Ms(200);
+        Delay_Ms(50);
 
         last_sent_level = current_level;
         sleep_cycle_count = 0; // Reset heartbeat counter
@@ -493,9 +641,10 @@ int main(void) {
 
         nrf24_power_down();
 
-        GPIO_ResetBits(GPIOD, LED_PIN); // ON
-        Delay_Ms(50);
-        GPIO_SetBits(GPIOD, LED_PIN); // OFF
+        // Flash LED to confirm data was SENT
+        GPIO_ResetBits(GPIOD, LED_PIN);
+        Delay_Ms(100);
+        GPIO_SetBits(GPIOD, LED_PIN);
       }
     } else {
       printf("[SYSTEM] Not paired, sleeping...\r\n");

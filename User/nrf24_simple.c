@@ -115,7 +115,8 @@ static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len) {
 
 void nrf24_init(void) {
   spi_init();
-  printf("[RADIO] Configuring Hardware (250kbps, -12dBm, NO-ACK)...\r\n");
+  printf(
+      "[RADIO] Configuring Hardware (250kbps, -6dBm, 2B-CRC, NO-ACK)...\r\n");
 
   Delay_Ms(150); // Increased settling delay
 
@@ -123,12 +124,12 @@ void nrf24_init(void) {
   nrf_write_reg(REG_CONFIG, 0x00); // Power Down
   Delay_Ms(10);
 
-  nrf_write_reg(REG_CONFIG, 0x02);     // PWR_UP, NO-CRC, Transmitter
+  nrf_write_reg(REG_CONFIG, 0x0E);     // PWR_UP, ENABLE-CRC (2B), Transmitter
   nrf_write_reg(REG_EN_AA, 0x00);      // RAW LINK: Disable Auto-Ack
   nrf_write_reg(REG_SETUP_AW, 0x01);   // 3-byte address
   nrf_write_reg(REG_SETUP_RETR, 0x00); // RAW LINK: Disable Retries
   nrf_write_reg(REG_RF_CH, 99);        // Channel 99
-  nrf_write_reg(REG_RF_SETUP, 0x26);   // 250kbps, 0dBm (MAX POWER)
+  nrf_write_reg(REG_RF_SETUP, 0x24);   // 250kbps, -6dBm (Balanced for Battery)
   nrf_write_reg(REG_RX_PW_P0, 32);     // Payload 32B
 
   // Flag cleaning
@@ -160,13 +161,13 @@ void nrf24_set_rx_addr(const uint8_t *addr) {
 
 void nrf24_power_up_tx(void) {
   // printf("[RADIO] >>> POWER_UP: TRANSMITTER MODE (NO-CRC) <<<\r\n");
-  nrf_write_reg(0x00, 0x02); // PWR_UP, Transmitter, No-CRC
+  nrf_write_reg(0x00, 0x0E); // PWR_UP, Transmitter, Enable-CRC (2B)
   Delay_Ms(5);
 }
 
 void nrf24_power_up_rx(void) {
   printf("[RADIO] >>> POWER_UP: RECEIVER MODE <<<\r\n");
-  nrf_write_reg(0x00, 0x0F);
+  nrf_write_reg(0x00, 0x0F); // PWR_UP, PRIM_RX, Enable-CRC (2B)
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
   Delay_Ms(5);
 }

@@ -21,24 +21,41 @@
 #define SENSOR_PIN_75 GPIO_Pin_2  // PC2
 #define SENSOR_PIN_100 GPIO_Pin_4 // PC4
 
+// Sensor Logic Constants
+#define SENSOR_STABLE_COUNT 2 // 2 cycles x 15s = 30s total stability
+#define BATTERY_LOW_THRESHOLD 15
+#define SENSOR_ERROR_VAL 0xFE
+
 // Battery Monitoring
 #define BATTERY_ADC_PIN GPIO_Pin_1 // PA1
 #define BATTERY_ADC_CHANNEL ADC_Channel_1
 
+// --- Battery Calibration Macros (Change these after PCB design) ---
+/*
+ * Connection Diagram:
+ * [Battery +] --- [BAT_RESISTOR_UP] ---+--- PA1 (ADC Pin)
+ *                                      |
+ *                              [BAT_RESISTOR_DOWN]
+ *                                      |
+ *                                    [GND]
+ */
+#define BAT_RESISTOR_UP 100.0f   // R1 (from Battery to PA1) in kOhm
+#define BAT_RESISTOR_DOWN 100.0f // R2 (from PA1 to GND) in kOhm
+#define BAT_MIN_VOLTS 3.0f       // 0% Battery Voltage (e.g., 3.0V for Li-ion)
+#define BAT_MAX_VOLTS 4.2f       // 100% Battery Voltage (e.g., 4.2V for Li-ion)
+// --- ----------------------------------------------------------- ---
+
 // Timing
-#define RESET_PRESS_TIME_MS 5000 // 5s  -> Factory Reset (Un-pair) Pairing
-#define PAIRING_TIME_MINS 1      // Set pairing duration in minutes
+#define RESET_PRESS_TIME_MS 5000
+#define PAIRING_TIME_MINS 1
 #define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
-#define DATA_SEND_INTERVAL_MS 5000
 
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
 #define HEARTBEAT_HOURS 4
 #define HEARTBEAT_INTERVAL_MS (HEARTBEAT_HOURS * 60UL * 60UL * 1000UL)
 
 // Deep Sleep Settings
-#define STAY_AWAKE_MS 60000 // 1 minute stay awake after activity
-#define AWU_SLEEP_SEC 30    // AWU wake up interval in seconds (~30s)
-// Calculate how many sleep cycles = 4 hours
+#define AWU_SLEEP_SEC 15 // Wake up every 15 seconds
 #define HEARTBEAT_CYCLES ((HEARTBEAT_HOURS * 3600) / AWU_SLEEP_SEC)
 
 // Protocol Constants - 3-byte address for pairing
