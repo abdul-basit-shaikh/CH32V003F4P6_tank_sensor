@@ -161,6 +161,7 @@ void flash_save_settings(void) {
 const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7, 0xE7}; // 3-byte pairing address
 volatile uint32_t g_millis = 0;
 uint32_t g_last_send = 0;
+uint8_t g_probe_fault = 0; // 1 = Fault detected (e.g., gap in readings)
 
 /* ========== TIM2 for millis (1ms) ========== */
 void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -224,8 +225,8 @@ void gpio_init(void) {
 }
 
 /**
- * @brief Reads all tank probes and applies a software patch for hardware
- * reliability.
+ * @brief Reads all tank probes and applies software patches for hardware
+ * reliability and fault monitoring.
  *
  * LOGIC EXPLANATION (Hardware Patch):
  * In a standard water tank, if a higher probe (e.g., 50%) is touching water,
@@ -233,34 +234,46 @@ void gpio_init(void) {
  * If a lower probe wire is broken or the probe is oxidized, it might
  * report "Dry" even when the tank is half full.
  *
- * This function fixes that:
- * 1. It reads physical pin states (PC0, PC1, PC2, PC4).
- * 2. If it detects water at a level 'X', it automatically marks all levels
- *    BELOW 'X' as "Wet" in software.
+ * This function handles two critical tasks:
+ * 1. PROBE FAULT DETECTION: It checks if there's a "gap" in readings (e.g.,
+ *    100% is wet but 25% is dry). If a gap is found, it sets g_probe_fault=1
+ *    to alert the user about possible broken wires or dirty sensors.
  *
- * Benefit: Prevents "jumpy" or incorrect readings (like 0% -> 50% -> 0%)
- * caused by faulty lower wiring.
+ * 2. BROKEN WIRE FIX: Even if a lower probe is faulty, the function
+ *    automatically fills in the gap in software to ensure the displayed
+ *    water level remains accurate.
+ *
+ * Benefit: Prevents "jumpy" or incorrect readings and provides a "Service
+ * Required" alert if hardware maintenance is needed.
  *
  * @return uint8_t Current water level (0, 25, 50, 75, or 100)
  */
 uint8_t read_internal_probes(void) {
-  GPIO_InitTypeDef GPIO_InitStructure = {0};
-  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
-
-  GPIO_InitStructure.GPIO_Pin =
-      SENSOR_PIN_25 | SENSOR_PIN_50 | SENSOR_PIN_75 | SENSOR_PIN_100;
-  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
-  GPIO_Init(GPIOC, &GPIO_InitStructure);
-
-  Delay_Ms(50); // Increased settling time
-
   uint8_t p25 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0);
   uint8_t p50 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0);
   uint8_t p75 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0);
   uint8_t p100 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0);
 
-  // --- HARDWARE PATCH: Broken Wire Fix ---
+  // --- FAULT DETECTION LOGIC ---
   // If a higher probe is wet, all lower ones MUST be wet.
+  // If not, we have a probe fault (broken wire or oxidation).
+  uint8_t current_fault = 0;
+  if (p100 && (!p75 || !p50 || !p25))
+    current_fault = 1;
+  else if (p75 && (!p50 || !p25))
+    current_fault = 1;
+  else if (p50 && !p25)
+    current_fault = 1;
+
+  if (current_fault) {
+    g_probe_fault = 1;
+    printf("[ALERT] Probe Fault Detected! (Gaps in readings)\r\n");
+  } else {
+    g_probe_fault = 0;
+  }
+
+  // --- HARDWARE PATCH: Broken Wire Fix ---
+  // If a higher probe is wet, all lower ones MUST be wet in the return value.
   if (p100) {
     p75 = 1;
     p50 = 1;
@@ -641,7 +654,9 @@ int main(void) {
 
         packet[8] = 0;
         if (current_battery <= BATTERY_LOW_THRESHOLD)
-          packet[8] |= 0x01;
+          packet[8] |= 0x01; // Low Battery Flag
+
+        packet[9] = g_probe_fault; // Probe Fault status (1 or 0)
 
         packet[12] = (uint8_t)(seq_num & 0xFF);
         packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
