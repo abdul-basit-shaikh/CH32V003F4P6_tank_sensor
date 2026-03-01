@@ -3,6 +3,16 @@
 
 #include "ch32v00x.h"
 #include <stdint.h>
+#include <stdio.h>
+
+// Debugging Switch
+#define DEBUG_ENABLE 1 // Set to 0 to turn off all serial prints
+
+#if DEBUG_ENABLE
+#define DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+#define DEBUG_PRINT(...)
+#endif
 
 // SPI1 Pins for NRF24L01
 #define NRF_SCK_PIN GPIO_Pin_5  // PC5
@@ -47,7 +57,8 @@
 // Timing
 #define RESET_PRESS_TIME_MS 5000
 #define PAIRING_TIME_MINS 1
-#define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / 50)
+#define PAIRING_INTERVAL_MS_DELAY 50
+#define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_INTERVAL_MS_DELAY)
 
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
 // Deep Sleep Settings

@@ -115,7 +115,7 @@ static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len) {
 
 void nrf24_init(void) {
   spi_init();
-  printf(
+  DEBUG_PRINT(
       "[RADIO] Configuring Hardware (250kbps, -6dBm, 2B-CRC, NO-ACK)...\r\n");
 
   Delay_Ms(150); // Increased settling delay
@@ -143,31 +143,32 @@ void nrf24_init(void) {
   spi_xfer(CMD_FLUSH_RX);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-  printf("[RADIO] Hardware Ready (SAFE-RAW).\r\n");
+  DEBUG_PRINT("[RADIO] Hardware Ready.\r\n");
 }
 
 void nrf24_set_tx_addr(const uint8_t *addr) {
-  printf("[RADIO] Targeting Address (3-Byte): %02X %02X %02X\r\n", addr[0],
-         addr[1], addr[2]);
+  DEBUG_PRINT("[RADIO] Targeting Address (3-Byte): %02X %02X %02X\r\n", addr[0],
+              addr[1], addr[2]);
   nrf_write_buf(REG_TX_ADDR, addr, 3);
   nrf_write_buf(REG_RX_ADDR_P0, addr, 3);
 }
 
 void nrf24_set_rx_addr(const uint8_t *addr) {
-  printf("[RADIO] Setting RX Address...\r\n");
+  DEBUG_PRINT("[RADIO] Setting RX Address...\r\n");
   nrf_write_buf(REG_RX_ADDR_P0, addr, 5);
   nrf_write_reg(REG_RX_PW_P0, 32);
 }
 
 void nrf24_power_up_tx(void) {
-  // printf("[RADIO] >>> POWER_UP: TRANSMITTER MODE (NO-CRC) <<<\r\n");
-  nrf_write_reg(0x00, 0x0E); // PWR_UP, Transmitter, Enable-CRC (2B)
+  // Config: PWR_UP=1, PRIM_RX=0 (PTX), EN_CRC=1, CRCO=1 (2B CRC)
+  nrf_write_reg(0x00, 0x0E);
   Delay_Ms(5);
 }
 
 void nrf24_power_up_rx(void) {
-  printf("[RADIO] >>> POWER_UP: RECEIVER MODE <<<\r\n");
-  nrf_write_reg(0x00, 0x0F); // PWR_UP, PRIM_RX, Enable-CRC (2B)
+  DEBUG_PRINT("[RADIO] >>> POWER_UP: RECEIVER MODE <<<\r\n");
+  // Config: PWR_UP=1, PRIM_RX=1 (PRX), EN_CRC=1, CRCO=1 (2B CRC)
+  nrf_write_reg(0x00, 0x0F);
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
   Delay_Ms(5);
 }
@@ -201,17 +202,17 @@ bool nrf24_send(uint8_t *data, uint8_t len) {
 
 bool nrf24_available(void) {
   uint8_t status = nrf_read_reg(0x07);
-  printf("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
-  printf("status %02X\r\n", status);
+  DEBUG_PRINT("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
+  DEBUG_PRINT("status %02X\r\n", status);
   if (status & 0x40) {
-    printf("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
+    DEBUG_PRINT("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
     return true;
   }
   return false;
 }
 
 void nrf24_read(uint8_t *data, uint8_t len) {
-  printf("[RADIO] Reading RX Payload...\r\n");
+  DEBUG_PRINT("[RADIO] Reading RX Payload...\r\n");
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_R_RX_PL);
   for (uint8_t i = 0; i < 32; i++) {
@@ -224,7 +225,7 @@ void nrf24_read(uint8_t *data, uint8_t len) {
 }
 
 void nrf24_power_down(void) {
-  printf("[RADIO] Powering DOWN...\r\n");
+  DEBUG_PRINT("[RADIO] Powering DOWN...\r\n");
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
   nrf_write_reg(REG_CONFIG, 0x08);
 }
