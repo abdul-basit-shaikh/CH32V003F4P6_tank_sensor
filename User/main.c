@@ -13,6 +13,19 @@
 #include <stdint.h>
 #include <string.h>
 
+/* ========== Function Prototypes ========== */
+void gpio_init(void);
+void adc_init(void);
+void exti_init(void);
+void pwr_sleep_init(void);
+void timer_init(void);
+void enter_deep_sleep(void);
+void flash_read_settings(void);
+void flash_save_settings(void);
+uint8_t read_tank_level(void);
+uint8_t read_battery_level(void);
+void run_pairing(void);
+
 /* ========== Power Management & AWU ========== */
 void pwr_sleep_init(void) {
   // Enable PWR clock
@@ -506,12 +519,6 @@ int main(void) {
     DEBUG_PRINT(
         "[SYSTEM] NOT PAIRED. Waiting for user to trigger pairing...\r\n");
   }
-
-  DEBUG_PRINT("[SYSTEM] Clock Validation: 1000ms delay...");
-  uint32_t t_start = millis();
-  Delay_Ms(1000);
-  DEBUG_PRINT(" DONE. Millis Diff: %lu ms\r\n",
-              (unsigned long)(millis() - t_start));
 
   // Boot UI: Triple blink (500ms ON, 500ms OFF)
   for (int i = 0; i < 3; i++) {
