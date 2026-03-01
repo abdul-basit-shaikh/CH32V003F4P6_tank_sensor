@@ -161,7 +161,6 @@ void flash_save_settings(void) {
 const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7,
                                  0xE7}; // Address for pairing packets
 volatile uint32_t g_millis = 0;         // Current system time in ms
-uint32_t g_last_send = 0;               // Time of last data transmission
 uint8_t g_probe_fault = 0; // 1 = Fault detected (e.g., gap in readings)
 
 /* ========== TIM2 for millis (1ms) ========== */
@@ -485,8 +484,9 @@ int main(void) {
 
   // SAFETY: Delay at boot to allow WCH-Link to connect before MCU sleeps.
   // This is the most reliable way to prevent "Lockout" during development.
-  DEBUG_PRINT("[SYSTEM] Safety Delay (5s) for Flashing... ");
-  Delay_Ms(5000);
+  DEBUG_PRINT("[SYSTEM] Safety Delay (%dms) for Flashing... ",
+              BOOT_SAFETY_DELAY_MS);
+  Delay_Ms(BOOT_SAFETY_DELAY_MS);
   DEBUG_PRINT("Ready.\r\n");
 
   __enable_irq();

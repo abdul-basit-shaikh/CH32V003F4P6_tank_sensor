@@ -55,10 +55,12 @@
 // --- ----------------------------------------------------------- ---
 
 // Timing
+#define BOOT_SAFETY_DELAY_MS 5000 
 #define RESET_PRESS_TIME_MS 5000
 #define PAIRING_TIME_MINS 1
 #define PAIRING_INTERVAL_MS_DELAY 50
-#define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_INTERVAL_MS_DELAY)
+#define PAIRING_BURST_COUNT                                                    \
+  ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_INTERVAL_MS_DELAY)
 
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
 // Deep Sleep Settings
