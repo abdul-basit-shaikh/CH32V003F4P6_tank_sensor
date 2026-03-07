@@ -261,32 +261,35 @@ void gpio_init(void) {
  *
  * @return uint8_t Current water level (0, 25, 50, 75, or 100)
  */
-uint8_t read_internal_probes(void) {
+uint8_t read_internal_probes(uint8_t *fault_out) {
   uint8_t p25 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0);
   uint8_t p50 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0);
   uint8_t p75 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0);
   uint8_t p100 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0);
 
-  // --- FAULT DETECTION LOGIC ---
-  // If a higher probe is wet, all lower ones MUST be wet.
-  // If not, we have a probe fault (broken wire or oxidation).
-  uint8_t current_fault = 0;
-  if (p100 && (!p75 || !p50 || !p25))
-    current_fault = 1;
-  else if (p75 && (!p50 || !p25))
-    current_fault = 1;
-  else if (p50 && !p25)
-    current_fault = 1;
-
-  if (current_fault) {
-    g_probe_fault = 1;
-    DEBUG_PRINT("[ALERT] Probe Fault Detected! (Gaps in readings)\r\n");
-  } else {
-    g_probe_fault = 0;
+  // --- FAULT DETECTION LOGIC: Bitmask Mode ---
+  uint8_t fault_mask = 0;
+  if (p100) {
+    if (!p75)
+      fault_mask |= (1 << 2);
+    if (!p50)
+      fault_mask |= (1 << 1);
+    if (!p25)
+      fault_mask |= (1 << 0);
+  } else if (p75) {
+    if (!p50)
+      fault_mask |= (1 << 1);
+    if (!p25)
+      fault_mask |= (1 << 0);
+  } else if (p50) {
+    if (!p25)
+      fault_mask |= (1 << 0);
   }
 
+  if (fault_out)
+    *fault_out = fault_mask;
+
   // --- HARDWARE PATCH: Broken Wire Fix ---
-  // If a higher probe is wet, all lower ones MUST be wet in the return value.
   if (p100) {
     p75 = 1;
     p50 = 1;
@@ -297,10 +300,6 @@ uint8_t read_internal_probes(void) {
   } else if (p50) {
     p25 = 1;
   }
-
-  // DEBUG: Raw probe state after patch
-  DEBUG_PRINT("[DEBUG] Probes: 100:%d 75:%d 50:%d 25:%d\r\n", p100, p75, p50,
-              p25);
 
   if (p100)
     return 100;
@@ -314,19 +313,23 @@ uint8_t read_internal_probes(void) {
 }
 
 uint8_t read_tank_level(void) {
-  uint8_t r1 = read_internal_probes();
-  uint8_t r2 = read_internal_probes();
-  uint8_t r3 = read_internal_probes();
+  uint8_t f1, f2, f3;
+  uint8_t r1 = read_internal_probes(&f1);
+  uint8_t r2 = read_internal_probes(&f2);
+  uint8_t r3 = read_internal_probes(&f3);
 
-  // Aggressive Detection: Highest level found in any sample
+  // Combine ALL faults found in any sample
+  g_probe_fault = f1 | f2 | f3;
+
   uint8_t best = r1;
   if (r2 > best)
     best = r2;
   if (r3 > best)
     best = r3;
 
-  if (best > 0)
-    DEBUG_PRINT("[DEBUG] Tank Level Detected: %d%%\r\n", best);
+  if (best > 0 || g_probe_fault > 0)
+    DEBUG_PRINT("[DATA] Level: %d%% | Fault Mask: 0x%02X\r\n", best,
+                g_probe_fault);
   return best;
 }
 
