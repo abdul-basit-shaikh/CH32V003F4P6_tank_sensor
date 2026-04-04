@@ -315,17 +315,28 @@ uint8_t read_internal_probes(uint8_t *fault_out) {
 uint8_t read_tank_level(void) {
   uint8_t f1, f2, f3;
   uint8_t r1 = read_internal_probes(&f1);
+  Delay_Ms(2);
   uint8_t r2 = read_internal_probes(&f2);
+  Delay_Ms(2);
   uint8_t r3 = read_internal_probes(&f3);
 
   // Combine ALL faults found in any sample
   g_probe_fault = f1 | f2 | f3;
 
-  uint8_t best = r1;
-  if (r2 > best)
-    best = r2;
-  if (r3 > best)
-    best = r3;
+  // Use median-of-3 instead of max-of-3 to avoid sticky high readings
+  // during fast draining (e.g. 25% -> 0%).
+  uint8_t min = r1;
+  uint8_t max = r1;
+  if (r2 < min)
+    min = r2;
+  if (r2 > max)
+    max = r2;
+  if (r3 < min)
+    min = r3;
+  if (r3 > max)
+    max = r3;
+  uint8_t best = (uint8_t)((uint16_t)r1 + (uint16_t)r2 + (uint16_t)r3 - min -
+                           max);
 
   if (best > 0 || g_probe_fault > 0)
     DEBUG_PRINT("[DATA] Level: %d%% | Fault Mask: 0x%02X\r\n", best,
