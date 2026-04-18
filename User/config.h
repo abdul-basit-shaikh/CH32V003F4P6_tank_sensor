@@ -71,4 +71,19 @@
 // Protocol Constants - 3-byte address for pairing
 extern const uint8_t PAIRING_ADDR[3];
 
+// Pairing ACK Configuration
+#define PAIRING_ACK_WAIT_MS 500 // Time to listen for controller ACK after each TX
+#define PAIRING_ACK_STATUS_FAILED 0x00
+#define PAIRING_ACK_STATUS_PAIRED 0x01
+#define PAIRING_ACK_STATUS_TIMEOUT 0x02
+#define PAIRING_ACK_STATUS_SLOTS_FULL 0x03
+#define PAIRING_ACK_STATUS_ALREADY_PAIRED 0x04
+#define PKT_TYPE_PAIRING_RESP 0x07
+
+// Data ACK Configuration
+#define DATA_ACK_WAIT_MS 300    // Time to listen for data ACK after each TX
+#define DATA_MAX_RETRIES 15     // Max retries if no ACK received
+#define DATA_RETRY_DELAY_MS 100 // Delay between retries
+#define PKT_TYPE_DATA_ACK 0x03  // ACK packet type from controller
+
 #endif

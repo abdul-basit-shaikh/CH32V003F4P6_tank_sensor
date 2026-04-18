@@ -116,7 +116,7 @@ static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len) {
 void nrf24_init(void) {
   spi_init();
   DEBUG_PRINT(
-      "[RADIO] Configuring Hardware (250kbps, -6dBm, 2B-CRC, NO-ACK)...\r\n");
+      "[NRF] Init: 1M 0dBm 2BCRC NO-ACK\r\n");
 
   Delay_Ms(150); // Increased settling delay
 
@@ -126,10 +126,11 @@ void nrf24_init(void) {
 
   nrf_write_reg(REG_CONFIG, 0x0E);     // PWR_UP, ENABLE-CRC (2B), Transmitter
   nrf_write_reg(REG_EN_AA, 0x00);      // RAW LINK: Disable Auto-Ack
+  nrf_write_reg(REG_EN_RXADDR, 0x01);  // Enable only Pipe 0
   nrf_write_reg(REG_SETUP_AW, 0x01);   // 3-byte address
   nrf_write_reg(REG_SETUP_RETR, 0x00); // RAW LINK: Disable Retries
   nrf_write_reg(REG_RF_CH, 99);        // Channel 99
-  nrf_write_reg(REG_RF_SETUP, 0x24);   // 250kbps, -6dBm (Balanced for Battery)
+  nrf_write_reg(REG_RF_SETUP, 0x06);   // 1Mbps, 0dBm (MAX power, best clone compat)
   nrf_write_reg(REG_RX_PW_P0, 32);     // Payload 32B
 
   // Flag cleaning
@@ -143,76 +144,105 @@ void nrf24_init(void) {
   spi_xfer(CMD_FLUSH_RX);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-  DEBUG_PRINT("[RADIO] Hardware Ready.\r\n");
+  // Verify registers after init
+  uint8_t cfg = nrf_read_reg(REG_CONFIG);
+  uint8_t ch = nrf_read_reg(REG_RF_CH);
+  uint8_t rf = nrf_read_reg(REG_RF_SETUP);
+  DEBUG_PRINT("[NRF] CFG=%02X CH=%d RF=%02X\r\n",
+             cfg, ch, rf);
+  DEBUG_PRINT("[NRF] Ready\r\n");
 }
 
 void nrf24_set_tx_addr(const uint8_t *addr) {
-  DEBUG_PRINT("[RADIO] Targeting Address (3-Byte): %02X %02X %02X\r\n", addr[0],
+  DEBUG_PRINT("[NRF] TXaddr: %02X%02X%02X\r\n", addr[0],
               addr[1], addr[2]);
   nrf_write_buf(REG_TX_ADDR, addr, 3);
   nrf_write_buf(REG_RX_ADDR_P0, addr, 3);
 }
 
 void nrf24_set_rx_addr(const uint8_t *addr) {
-  DEBUG_PRINT("[RADIO] Setting RX Address...\r\n");
+  DEBUG_PRINT("[NRF] RXaddr set\r\n");
   nrf_write_buf(REG_RX_ADDR_P0, addr, 5);
   nrf_write_reg(REG_RX_PW_P0, 32);
 }
 
 void nrf24_power_up_tx(void) {
-  // Config: PWR_UP=1, PRIM_RX=0 (PTX), EN_CRC=1, CRCO=1 (2B CRC)
-  nrf_write_reg(0x00, 0x0E);
-  Delay_Ms(5);
+  GPIO_ResetBits(GPIOD, NRF_CE_PIN); // CE LOW before mode switch!
+  nrf_write_reg(REG_CONFIG, 0x00);   // Power down for PLL re-lock (clone fix)
+  Delay_Ms(2);
+  nrf_write_reg(REG_CONFIG, 0x0E);   // PWR_UP, PTX, 2B CRC
+  Delay_Ms(2);
 }
 
 void nrf24_power_up_rx(void) {
-  DEBUG_PRINT("[RADIO] >>> POWER_UP: RECEIVER MODE <<<\r\n");
-  // Config: PWR_UP=1, PRIM_RX=1 (PRX), EN_CRC=1, CRCO=1 (2B CRC)
-  nrf_write_reg(0x00, 0x0F);
-  GPIO_SetBits(GPIOD, NRF_CE_PIN);
-  Delay_Ms(5);
+  GPIO_ResetBits(GPIOD, NRF_CE_PIN);  // CE LOW first
+
+  // Full power-down cycle for PLL re-lock (clone NRF24 fix)
+  nrf_write_reg(REG_CONFIG, 0x00);     // Power down completely
+  Delay_Ms(2);
+
+  // Re-write essential registers for clean state
+  nrf_write_reg(REG_EN_AA, 0x00);
+  nrf_write_reg(REG_RF_CH, 99);
+  nrf_write_reg(REG_RF_SETUP, 0x06);
+  nrf_write_reg(REG_RX_PW_P0, 32);
+
+  // Clear flags + flush FIFOs
+  nrf_write_reg(REG_STATUS, 0x70);
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_TX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_RX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+
+  // Power up in RX mode
+  nrf_write_reg(REG_CONFIG, 0x0F);    // PWR_UP + PRIM_RX + CRC 2B
+  Delay_Ms(2);                         // Oscillator + PLL lock
+  GPIO_SetBits(GPIOD, NRF_CE_PIN);   // Start listening
+  Delay_Ms(1);
 }
 
 bool nrf24_send(uint8_t *data, uint8_t len) {
-  // 1. Clear any pending interrupts and flush TX FIFO
-  nrf_write_reg(0x07, 0x70);
+  // 1. CE LOW (critical for clean TX trigger)
+  GPIO_ResetBits(GPIOD, NRF_CE_PIN);
 
+  // 2. Clear flags and flush TX FIFO
+  nrf_write_reg(0x07, 0x70);
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_FLUSH_TX);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-  // 2. Write Payload
+  // 3. Write Payload
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_W_TX_PL);
   for (uint8_t i = 0; i < 32; i++)
     spi_xfer(i < len ? data[i] : 0);
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 
-  // 3. Trigger Transmission with a robust pulse
+  // 4. CE pulse (LOW->HIGH edge triggers TX)
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
-  Delay_Ms(5); // Increased to 5ms for 250kbps stability
+  Delay_Ms(1);
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
 
-  // 4. Wait for transmission to finish and clear flags again
+  // 5. Wait for TX complete, clear flags
   Delay_Ms(2);
-  nrf_write_reg(0x07, 0x30); // Clear TX_DS and MAX_RT flags
+  nrf_write_reg(0x07, 0x30);
 
   return true;
 }
 
 bool nrf24_available(void) {
   uint8_t status = nrf_read_reg(0x07);
-  DEBUG_PRINT("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
-  DEBUG_PRINT("status %02X\r\n", status);
   if (status & 0x40) {
-    DEBUG_PRINT("[RADIO] >>> DATA ARRIVED: RX Payload detected <<<\r\n");
+    DEBUG_PRINT("[NRF] RX_DR! S:0x%02X\r\n",
+               status);
     return true;
   }
   return false;
 }
 
 void nrf24_read(uint8_t *data, uint8_t len) {
-  DEBUG_PRINT("[RADIO] Reading RX Payload...\r\n");
   GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
   spi_xfer(CMD_R_RX_PL);
   for (uint8_t i = 0; i < 32; i++) {
@@ -222,10 +252,27 @@ void nrf24_read(uint8_t *data, uint8_t len) {
   }
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
   nrf_write_reg(0x07, 0x40); // Clear RX_DR
+
+  // Hex dump of received packet
+  DEBUG_PRINT("[NRF] RX: ");
+  for (uint8_t i = 0; i < 8; i++)
+    DEBUG_PRINT("%02X ", data[i]);
+  DEBUG_PRINT("\r\n");
+}
+
+void nrf24_flush_rx(void) {
+  GPIO_ResetBits(GPIOD, NRF_CE_PIN); // CE low during flush
+  nrf_write_reg(0x07, 0x70);         // Clear all status flags
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_RX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_FLUSH_TX);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 }
 
 void nrf24_power_down(void) {
-  DEBUG_PRINT("[RADIO] Powering DOWN...\r\n");
+  DEBUG_PRINT("[NRF] PwrDn\r\n");
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
   nrf_write_reg(REG_CONFIG, 0x08);
 }
