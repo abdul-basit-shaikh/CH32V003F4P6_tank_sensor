@@ -676,6 +676,7 @@ int main(void) {
   uint8_t stable_counter = 0;
   bool first_reading_done = false;
   uint8_t current_battery = 0;
+  uint8_t retry_cooldown = 0; // AWU cycles to wait before retry after ACK fail
 
   while (1) {
     // 1. Button Handling
@@ -791,8 +792,22 @@ int main(void) {
         Delay_Ms(100); // stabilize battery reading
       }
 
-      // Send if: First time OR Level changed OR 4 hours passed
-      if (last_sent_level == 0xFF || level_changed || heartbeat_due) {
+      // Send if: First time OR Level changed OR 4 hours heartbeat
+      // But respect cooldown after failed ACK (wait ~1 min)
+      bool need_send = (last_sent_level == 0xFF || level_changed || heartbeat_due);
+
+      if (level_changed) {
+        // New data! Reset cooldown immediately
+        retry_cooldown = 0;
+      } else if (need_send && retry_cooldown > 0) {
+        retry_cooldown--;
+        if (retry_cooldown > 0) {
+          need_send = false; // Still cooling down, skip this wake
+          DEBUG_PRINT("[TX] Cooldown %d\r\n", retry_cooldown);
+        }
+      }
+
+      if (need_send) {
         uint8_t packet[32];
         for (int i = 0; i < 32; i++)
           packet[i] = 0; // Absolute Zero-Fill
@@ -823,30 +838,102 @@ int main(void) {
                     (unsigned long)seq_num, current_level, current_battery,
                     g_probe_fault);
 
-        // --- POWERFUL RADIO RE-INIT ---
-        nrf24_init(); // Reset state
-        nrf24_power_up_tx();
-        nrf24_set_tx_addr(PAIRING_ADDR);
-        Delay_Ms(200);
+        // --- DATA TX WITH ACK + RETRY ---
+        nrf24_init();
+        bool ack_received = false;
 
-        // Burst send 3 times (ACK retry to be added later)
-        for (int b = 0; b < 3; b++) {
-          nrf24_send(packet, 32);
-          Delay_Ms(20);
+        for (uint8_t attempt = 0; attempt < DATA_MAX_RETRIES && !ack_received;
+             attempt++) {
+          // TX: Send 3x burst
+          nrf24_power_up_tx();
+          nrf24_set_tx_addr(PAIRING_ADDR);
+          for (int b = 0; b < 3; b++) {
+            nrf24_send(packet, 32);
+            Delay_Ms(10);
+          }
+
+          if (attempt == 0)
+            DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n",
+                        (unsigned long)seq_num, attempt);
+
+          // RX: Listen for DATA-ACK from controller
+          nrf24_flush_rx();
+          nrf24_power_up_rx();
+
+          uint32_t start = millis();
+          while ((millis() - start) < DATA_ACK_WAIT_MS) {
+            if (nrf24_available()) {
+              uint8_t rx[32];
+              nrf24_read(rx, 32);
+
+              // Check normal sync + PKT_TYPE_ACK
+              if (rx[0] == 0xAA && rx[1] == 0x55 &&
+                  rx[2] == PKT_TYPE_DATA_ACK) {
+                uint8_t crc = calculate_checksum(rx, 32);
+                uint16_t ack_id = (uint16_t)rx[4] | ((uint16_t)rx[5] << 8);
+                uint32_t ack_seq = (uint32_t)rx[6] | ((uint32_t)rx[7] << 8) |
+                                   ((uint32_t)rx[8] << 16) |
+                                   ((uint32_t)rx[9] << 24);
+
+                if (crc == rx[31] && ack_id == g_settings.tank_id &&
+                    ack_seq == seq_num) {
+                  ack_received = true;
+                  DEBUG_PRINT("[ACK] OK try:%d\r\n", attempt);
+                  break;
+                }
+              }
+
+              // Check inverted sync
+              {
+                uint8_t inv[32];
+                for (int j = 0; j < 32; j++)
+                  inv[j] = ~rx[j];
+                if (inv[0] == 0xAA && inv[1] == 0x55 &&
+                    inv[2] == PKT_TYPE_DATA_ACK) {
+                  uint8_t crc = calculate_checksum(inv, 32);
+                  uint16_t ack_id =
+                      (uint16_t)inv[4] | ((uint16_t)inv[5] << 8);
+                  uint32_t ack_seq =
+                      (uint32_t)inv[6] | ((uint32_t)inv[7] << 8) |
+                      ((uint32_t)inv[8] << 16) | ((uint32_t)inv[9] << 24);
+
+                  if (crc == inv[31] && ack_id == g_settings.tank_id &&
+                      ack_seq == seq_num) {
+                    ack_received = true;
+                    DEBUG_PRINT("[ACK] OK(inv) try:%d\r\n", attempt);
+                    break;
+                  }
+                }
+              }
+            }
+            Delay_Ms(1);
+          }
+
+          if (!ack_received && attempt < DATA_MAX_RETRIES - 1)
+            Delay_Ms(DATA_RETRY_DELAY_MS);
         }
-        DEBUG_PRINT("[TX] Sent 3x\r\n");
 
-        Delay_Ms(50);
+        if (!ack_received)
+          DEBUG_PRINT("[TX] NO ACK after %d tries\r\n",
+                      DATA_MAX_RETRIES);
 
-        last_sent_level = current_level;
-        sleep_cycle_count = 0; // Reset heartbeat counter
-        seq_num++;
+        if (ack_received) {
+          // ACK received: update state, increment seq
+          last_sent_level = current_level;
+          seq_num++;
+          retry_cooldown = 0;
+        } else {
+          // No ACK: DON'T update last_sent_level so level_changed stays true
+          // Wait ~1 min (4 AWU cycles x 15s) before retrying
+          retry_cooldown = 4;
+        }
+        sleep_cycle_count = 0;
 
         nrf24_power_down();
 
-        // Quick LED blink to confirm TX
+        // LED: fast blink=ACK ok, slow blink=no ACK
         GPIO_ResetBits(GPIOD, LED_PIN);
-        Delay_Ms(100);
+        Delay_Ms(ack_received ? 50 : 500);
         GPIO_SetBits(GPIOD, LED_PIN);
       }
     } else {
