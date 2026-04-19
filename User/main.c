@@ -43,7 +43,6 @@ typedef struct {
 
 typedef enum {
   BUTTON_ACTION_NONE = 0,
-  BUTTON_ACTION_START_PAIR,
   BUTTON_ACTION_RESET,
   BUTTON_ACTION_FACTORY_RESET,
 } button_action_t;
@@ -292,8 +291,11 @@ static button_action_t poll_button_action(runtime_state_t *runtime) {
   if (!runtime->pairing_triggered && held_ms > 10 &&
       held_ms < RESET_PRESS_TIME_MS) {
     runtime->pairing_triggered = false;
-    return (g_settings.pairing_status == 0) ? BUTTON_ACTION_START_PAIR
-                                            : BUTTON_ACTION_RESET;
+    if (g_settings.pairing_status == 1) {
+      return BUTTON_ACTION_RESET;
+    }
+
+    return BUTTON_ACTION_NONE;
   }
 
   runtime->pairing_triggered = false;
@@ -342,13 +344,6 @@ static void handle_button_action(runtime_state_t *runtime,
     g_settings.pairing_status = 0;
     flash_save_settings();
 
-    reset_runtime_tracking(runtime);
-    run_pairing();
-    return;
-  }
-
-  if (action == BUTTON_ACTION_START_PAIR) {
-    DEBUG_PRINT("[SYS] Click -> Pair\r\n");
     reset_runtime_tracking(runtime);
     run_pairing();
     return;
@@ -835,16 +830,11 @@ void run_pairing(void) {
 
   for (int i = 0; i < PAIRING_BURST_COUNT && !paired; i++) {
     // LED blink pattern
-    if ((i % 10) < 5)
+    if ((i % 2) < 1)
       GPIO_ResetBits(GPIOD, LED_PIN);
     else
       GPIO_SetBits(GPIOD, LED_PIN);
 
-    // Log every 20th burst so user can see progress
-    if (i % 20 == 0) {
-      DEBUG_PRINT("[PAIR] #%d/%d S:0x%02X\r\n", i,
-                  PAIRING_BURST_COUNT, nrf24_get_status());
-    }
 
     // 1. Send pairing request
     nrf24_power_up_tx();
