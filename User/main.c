@@ -750,13 +750,22 @@ uint8_t read_battery_level(void) {
 
   // V_bat_mV = bat_raw * 1200 * 2 / vref_raw (for 100k/100k divider)
   uint32_t v_bat_mv = ((uint32_t)bat_raw * 2400) / vref_raw;
+  const uint32_t battery_min_mv = BAT_MIN_MV;
+  const uint32_t battery_max_mv = BAT_MAX_MV;
 
   DEBUG_PRINT("[BAT] %lumV\r\n", (unsigned long)v_bat_mv);
 
-  // Map 3000mV-4200mV to 0-100%
-  if (v_bat_mv >= 4200) return 100;
-  if (v_bat_mv <= 3000) return 0;
-  return (uint8_t)((v_bat_mv - 3000) * 100 / 1200);
+  if (battery_max_mv <= battery_min_mv)
+    return 0;
+
+  // Map configured battery window to 0-100%
+  if (v_bat_mv >= battery_max_mv)
+    return 100;
+  if (v_bat_mv <= battery_min_mv)
+    return 0;
+
+  return (uint8_t)((v_bat_mv - battery_min_mv) * 100 /
+                   (battery_max_mv - battery_min_mv));
 }
 
 /* ========== Auto-Generate Tank ID ========== */

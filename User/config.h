@@ -32,7 +32,7 @@
 #define SENSOR_PIN_100 GPIO_Pin_4 // PC4
 
 // Sensor Logic Constants
-#define BATTERY_LOW_THRESHOLD 15
+#define BATTERY_LOW_THRESHOLD 25 // Warn at ~2.85V for the 2.7V-3.3V range
 #define SENSOR_ERROR_VAL 0xFE
 
 // Battery Monitoring
@@ -50,8 +50,10 @@
  */
 #define BAT_RESISTOR_UP 100.0f   // R1 (from Battery to PA1) in kOhm
 #define BAT_RESISTOR_DOWN 100.0f // R2 (from PA1 to GND) in kOhm
-#define BAT_MIN_VOLTS 3.0f       // 0% Battery Voltage (e.g., 3.0V for Li-ion)
-#define BAT_MAX_VOLTS 4.2f       // 100% Battery Voltage (e.g., 4.2V for Li-ion)
+#define BAT_MIN_VOLTS 2.7f       // 0% battery voltage for this 3.3V pack
+#define BAT_MAX_VOLTS 3.3f       // 100% battery voltage for this 3.3V pack
+#define BAT_MIN_MV 2700UL
+#define BAT_MAX_MV 3300UL
 // --- ----------------------------------------------------------- ---
 
 // Timing
