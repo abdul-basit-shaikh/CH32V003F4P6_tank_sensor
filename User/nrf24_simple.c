@@ -43,7 +43,7 @@ static void spi_init(void) {
 
   // MISO (PC7)
   GPIO_InitStructure.GPIO_Pin = NRF_MISO_PIN;
-  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
   GPIO_Init(GPIOC, &GPIO_InitStructure);
 
   // CSN (PC3)
@@ -115,8 +115,7 @@ static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len) {
 
 void nrf24_init(void) {
   spi_init();
-  DEBUG_PRINT(
-      "[NRF] Init: 1M 0dBm 2BCRC NO-ACK\r\n");
+  DEBUG_PRINT("[NRF] Init: 250k 0dBm 2BCRC NO-ACK\r\n");
 
   Delay_Ms(150); // Increased settling delay
 
@@ -148,9 +147,7 @@ void nrf24_init(void) {
   uint8_t cfg = nrf_read_reg(REG_CONFIG);
   uint8_t ch = nrf_read_reg(REG_RF_CH);
   uint8_t rf = nrf_read_reg(REG_RF_SETUP);
-  DEBUG_PRINT("[NRF] CFG=%02X CH=%d RF=%02X\r\n",
-             cfg, ch, rf);
-  DEBUG_PRINT("[NRF] Ready\r\n");
+  DEBUG_PRINT("[NRF] CFG=%02X CH=%d RF=%02X\r\n",cfg, ch, rf);
 }
 
 void nrf24_set_tx_addr(const uint8_t *addr) {
@@ -162,7 +159,7 @@ void nrf24_set_tx_addr(const uint8_t *addr) {
 
 void nrf24_set_rx_addr(const uint8_t *addr) {
   DEBUG_PRINT("[NRF] RXaddr set\r\n");
-  nrf_write_buf(REG_RX_ADDR_P0, addr, 5);
+  nrf_write_buf(REG_RX_ADDR_P0, addr, 3);
   nrf_write_reg(REG_RX_PW_P0, 32);
 }
 

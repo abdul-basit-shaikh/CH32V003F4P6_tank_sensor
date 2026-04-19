@@ -735,37 +735,29 @@ uint16_t get_adc_val(uint8_t ch) {
 }
 
 uint8_t read_battery_level(void) {
-  // Integer-only battery calculation (no float library needed)
-  uint32_t vref_sum = 0;
-  for (int i = 0; i < 8; i++)
-    vref_sum += get_adc_val(ADC_Channel_Vrefint);
-  uint16_t vref_raw = vref_sum / 8;
-  if (vref_raw == 0)
-    return 0;
+  uint32_t accum = 0;
+  uint8_t i;
 
-  uint32_t bat_sum = 0;
-  for (int i = 0; i < 8; i++)
-    bat_sum += get_adc_val(BATTERY_ADC_CHANNEL);
-  uint16_t bat_raw = bat_sum / 8;
+  for (i = 0; i < 8; i++)
+    accum += get_adc_val(ADC_Channel_Vrefint);
+  uint16_t vref_raw = (uint16_t)(accum / 8);
 
-  // V_bat_mV = bat_raw * 1200 * 2 / vref_raw (for 100k/100k divider)
-  uint32_t v_bat_mv = ((uint32_t)bat_raw * 2400) / vref_raw;
-  const uint32_t battery_min_mv = BAT_MIN_MV;
-  const uint32_t battery_max_mv = BAT_MAX_MV;
+  if (vref_raw == 0) return 0;
 
+  accum = 0;
+  for (i = 0; i < 8; i++)
+    accum += get_adc_val(BATTERY_ADC_CHANNEL);
+  uint16_t bat_raw = (uint16_t)(accum / 8);
+
+  uint32_t v_bat_mv = ((uint32_t)bat_raw * BAT_VOLTAGE_SCALE) / vref_raw;
   DEBUG_PRINT("[BAT] %lumV\r\n", (unsigned long)v_bat_mv);
 
-  if (battery_max_mv <= battery_min_mv)
-    return 0;
+  if (BAT_MAX_MV <= BAT_MIN_MV) return 0;
+  if (v_bat_mv >= BAT_MAX_MV)   return 100;
+  if (v_bat_mv <= BAT_MIN_MV)   return 0;
 
-  // Map configured battery window to 0-100%
-  if (v_bat_mv >= battery_max_mv)
-    return 100;
-  if (v_bat_mv <= battery_min_mv)
-    return 0;
-
-  return (uint8_t)((v_bat_mv - battery_min_mv) * 100 /
-                   (battery_max_mv - battery_min_mv));
+  return (uint8_t)((v_bat_mv - BAT_MIN_MV) * 100 /
+                   (BAT_MAX_MV - BAT_MIN_MV));
 }
 
 /* ========== Auto-Generate Tank ID ========== */

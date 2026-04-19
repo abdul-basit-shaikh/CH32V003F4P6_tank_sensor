@@ -48,12 +48,13 @@
  *                                      |
  *                                    [GND]
  */
-#define BAT_RESISTOR_UP 100.0f   // R1 (from Battery to PA1) in kOhm
-#define BAT_RESISTOR_DOWN 100.0f // R2 (from PA1 to GND) in kOhm
-#define BAT_MIN_VOLTS 2.7f       // 0% battery voltage for this 3.3V pack
-#define BAT_MAX_VOLTS 3.3f       // 100% battery voltage for this 3.3V pack
-#define BAT_MIN_MV 2700UL
-#define BAT_MAX_MV 3300UL
+
+#define BAT_RESISTOR_UP    100000UL  // = 100,000 ohm = 100kΩ R1 (from Battery to PA1) in kOhm
+#define BAT_RESISTOR_DOWN  100000UL  // = 100,000 ohm = 100kΩ R2 (from PA1 to GND) in kOhm
+#define BAT_VOLTAGE_SCALE  ((1200UL * (BAT_RESISTOR_UP + BAT_RESISTOR_DOWN)) / BAT_RESISTOR_DOWN)
+
+#define BAT_MIN_MV 2700UL   // 0% battery voltage in millivolts
+#define BAT_MAX_MV 3300UL   // 100% battery voltage in millivolts
 // --- ----------------------------------------------------------- ---
 
 // Timing
