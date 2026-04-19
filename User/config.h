@@ -57,13 +57,6 @@
 #define BAT_MAX_MV 3300UL   // 100% battery voltage in millivolts
 // --- ----------------------------------------------------------- ---
 
-// Timing
-#define BOOT_SAFETY_DELAY_MS 5000 
-#define RESET_PRESS_TIME_MS 5000
-#define PAIRING_TIME_MINS 1
-#define PAIRING_INTERVAL_MS_DELAY 50
-#define PAIRING_BURST_COUNT                                                    \
-  ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_INTERVAL_MS_DELAY)
 
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
 // Deep Sleep Settings
@@ -88,5 +81,12 @@ extern const uint8_t PAIRING_ADDR[3];
 #define DATA_MAX_RETRIES 15     // Max retries if no ACK received
 #define DATA_RETRY_DELAY_MS 100 // Delay between retries
 #define PKT_TYPE_DATA_ACK 0x03  // ACK packet type from controller
+
+// Timing
+#define BOOT_SAFETY_DELAY_MS 5000 
+#define RESET_PRESS_TIME_MS 5000
+#define PAIRING_TIME_MINS 1
+#define PAIRING_BURST_COUNT ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_ACK_WAIT_MS)
+
 
 #endif

@@ -829,7 +829,14 @@ void run_pairing(void) {
   bool paired = false;
   uint8_t ack_status = PAIRING_ACK_STATUS_TIMEOUT;
 
+  uint32_t pairing_start_time = millis();
   for (int i = 0; i < PAIRING_BURST_COUNT && !paired; i++) {
+    // Check for 1 minute timeout explicitly
+    if ((millis() - pairing_start_time) > (PAIRING_TIME_MINS * 60000)) {
+      DEBUG_PRINT("[PAIR] Timeout reached after %d mins\r\n", PAIRING_TIME_MINS);
+      break;
+    }
+
     // LED blink pattern
     if ((i % 2) < 1)
       GPIO_ResetBits(GPIOD, LED_PIN);
