@@ -25,6 +25,46 @@ void flash_save_settings(void);
 uint8_t read_tank_level(void);
 uint8_t read_battery_level(void);
 void run_pairing(void);
+uint32_t millis(void);
+uint8_t calculate_checksum(uint8_t *data, uint8_t length);
+
+typedef struct {
+  uint32_t button_press_start;
+  bool pairing_triggered;
+  uint16_t sleep_cycle_count;
+  uint32_t seq_num;
+  uint8_t last_sent_level;
+  uint8_t filtered_level;
+  uint8_t stable_counter;
+  bool first_reading_done;
+  uint8_t current_battery;
+  uint8_t retry_cooldown;
+} runtime_state_t;
+
+typedef enum {
+  BUTTON_ACTION_NONE = 0,
+  BUTTON_ACTION_START_PAIR,
+  BUTTON_ACTION_RESET,
+  BUTTON_ACTION_FACTORY_RESET,
+} button_action_t;
+
+typedef enum {
+  TX_WAIT_TIMEOUT = 0,
+  TX_WAIT_ACK_RECEIVED,
+  TX_WAIT_LEVEL_CHANGED,
+  TX_WAIT_ABORTED,
+} tx_wait_result_t;
+
+typedef enum {
+  TX_SEND_NO_ACK = 0,
+  TX_SEND_ACKED,
+  TX_SEND_RESTART_LEVEL,
+  TX_SEND_ABORTED,
+} tx_send_result_t;
+
+static volatile uint8_t g_sensor_event_pending = 0;
+static volatile uint8_t g_button_event_pending = 0;
+static runtime_state_t g_runtime;
 
 /* ========== Power Management & AWU ========== */
 void pwr_sleep_init(void) {
@@ -92,6 +132,17 @@ void exti_init(void) {
 
 void EXTI7_0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void EXTI7_0_IRQHandler(void) {
+  if (EXTI_GetITStatus(EXTI_Line0) != RESET ||
+      EXTI_GetITStatus(EXTI_Line1) != RESET ||
+      EXTI_GetITStatus(EXTI_Line2) != RESET ||
+      EXTI_GetITStatus(EXTI_Line4) != RESET) {
+    g_sensor_event_pending = 1;
+  }
+
+  if (EXTI_GetITStatus(EXTI_Line6) != RESET) {
+    g_button_event_pending = 1;
+  }
+
   // Clear all pending flags for sensor pins and button
   EXTI_ClearITPendingBit(EXTI_Line0 | EXTI_Line1 | EXTI_Line2 | EXTI_Line4 |
                          EXTI_Line6);
@@ -175,6 +226,305 @@ const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7,
                                  0xE7}; // Address for pairing packets
 volatile uint32_t g_millis = 0;         // Current system time in ms
 uint8_t g_probe_fault = 0; // 1 = Fault detected (e.g., gap in readings)
+
+static void reset_runtime_tracking(runtime_state_t *runtime) {
+  runtime->button_press_start = 0;
+  runtime->pairing_triggered = false;
+  runtime->sleep_cycle_count = 0;
+  runtime->seq_num = 0;
+  runtime->last_sent_level = 0xFF;
+  runtime->filtered_level = 0;
+  runtime->stable_counter = 0;
+  runtime->first_reading_done = false;
+  runtime->current_battery = 0;
+  runtime->retry_cooldown = 0;
+  g_sensor_event_pending = 0;
+  g_button_event_pending = 0;
+}
+
+static uint8_t sample_filtered_level(runtime_state_t *runtime) {
+  uint8_t raw_level = read_tank_level();
+
+  if (!runtime->first_reading_done) {
+    runtime->filtered_level = raw_level;
+    runtime->first_reading_done = true;
+    runtime->stable_counter = 0;
+    DEBUG_PRINT("[SYSTEM] Init Level: %d%%\r\n",
+                runtime->filtered_level);
+  } else if (raw_level == runtime->filtered_level) {
+    runtime->stable_counter = 0;
+  } else {
+    runtime->stable_counter++;
+    if (runtime->stable_counter >= 1) {
+      runtime->filtered_level = raw_level;
+      runtime->stable_counter = 0;
+      DEBUG_PRINT("[SYS] LvlChg: %d%%\r\n",
+                  runtime->filtered_level);
+    }
+  }
+
+  return runtime->filtered_level;
+}
+
+static button_action_t poll_button_action(runtime_state_t *runtime) {
+  if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+    if (runtime->button_press_start == 0) {
+      runtime->button_press_start = millis();
+      DEBUG_PRINT("[SYSTEM] Button Pressed\r\n");
+    }
+
+    if (!runtime->pairing_triggered &&
+        (millis() - runtime->button_press_start) > RESET_PRESS_TIME_MS) {
+      runtime->pairing_triggered = true;
+      return BUTTON_ACTION_FACTORY_RESET;
+    }
+
+    return BUTTON_ACTION_NONE;
+  }
+
+  if (runtime->button_press_start == 0) {
+    return BUTTON_ACTION_NONE;
+  }
+
+  uint32_t held_ms = millis() - runtime->button_press_start;
+  runtime->button_press_start = 0;
+
+  if (!runtime->pairing_triggered && held_ms > 10 &&
+      held_ms < RESET_PRESS_TIME_MS) {
+    runtime->pairing_triggered = false;
+    return (g_settings.pairing_status == 0) ? BUTTON_ACTION_START_PAIR
+                                            : BUTTON_ACTION_RESET;
+  }
+
+  runtime->pairing_triggered = false;
+  return BUTTON_ACTION_NONE;
+}
+
+static void send_unpair_before_reset(void) {
+  DEBUG_PRINT("Sending UNPAIR before reset\r\n");
+
+  uint8_t unpair_pkt[32] = {0};
+  unpair_pkt[0] = 0xAA;
+  unpair_pkt[1] = 0x55;
+  unpair_pkt[2] = 0x06; // PKT_TYPE_UNPAIR
+  unpair_pkt[3] = 32;
+  unpair_pkt[4] = (uint8_t)(g_settings.tank_id & 0xFF);
+  unpair_pkt[5] = (uint8_t)(g_settings.tank_id >> 8);
+  unpair_pkt[31] = calculate_checksum(unpair_pkt, 32);
+
+  nrf24_power_up_tx();
+  nrf24_set_tx_addr(PAIRING_ADDR);
+  for (int i = 0; i < 20; i++) {
+    nrf24_send(unpair_pkt, 32);
+    Delay_Ms(30);
+  }
+  nrf24_power_down();
+}
+
+static void handle_button_action(runtime_state_t *runtime,
+                                 button_action_t action) {
+  runtime->button_press_start = 0;
+  runtime->pairing_triggered = false;
+  g_button_event_pending = 0;
+
+  if (action == BUTTON_ACTION_NONE) {
+    return;
+  }
+
+  if (action == BUTTON_ACTION_FACTORY_RESET) {
+    DEBUG_PRINT("[SYS] FACTORY RESET\r\n");
+
+    if (g_settings.pairing_status == 1 && g_settings.tank_id != 0) {
+      send_unpair_before_reset();
+    }
+
+    g_settings.tank_id = 0;
+    g_settings.pairing_status = 0;
+    flash_save_settings();
+
+    reset_runtime_tracking(runtime);
+    run_pairing();
+    return;
+  }
+
+  if (action == BUTTON_ACTION_START_PAIR) {
+    DEBUG_PRINT("[SYS] Click -> Pair\r\n");
+    reset_runtime_tracking(runtime);
+    run_pairing();
+    return;
+  }
+
+  DEBUG_PRINT("[SYS] Click -> Reset\r\n");
+  Delay_Ms(100);
+  NVIC->SCTLR |= (1 << 31); // SYSRESETREQ
+}
+
+static bool packet_matches_data_ack(uint8_t *packet, uint32_t seq_num) {
+  if (packet[0] != 0xAA || packet[1] != 0x55 ||
+      packet[2] != PKT_TYPE_DATA_ACK) {
+    return false;
+  }
+
+  uint8_t crc = calculate_checksum(packet, 32);
+  uint16_t ack_id = (uint16_t)packet[4] | ((uint16_t)packet[5] << 8);
+  uint32_t ack_seq = (uint32_t)packet[6] | ((uint32_t)packet[7] << 8) |
+                     ((uint32_t)packet[8] << 16) |
+                     ((uint32_t)packet[9] << 24);
+
+  return crc == packet[31] && ack_id == g_settings.tank_id &&
+         ack_seq == seq_num;
+}
+
+static tx_wait_result_t service_runtime_window(runtime_state_t *runtime,
+                                               uint32_t wait_ms,
+                                               bool listen_for_ack,
+                                               uint8_t attempt,
+                                               uint32_t seq_num,
+                                               uint8_t sent_level,
+                                               uint8_t *latest_level) {
+  uint32_t start = millis();
+
+  while ((millis() - start) < wait_ms) {
+    if (listen_for_ack && nrf24_available()) {
+      uint8_t rx[32];
+      nrf24_read(rx, 32);
+
+      if (packet_matches_data_ack(rx, seq_num)) {
+        DEBUG_PRINT("[ACK] OK try:%d\r\n", attempt);
+        return TX_WAIT_ACK_RECEIVED;
+      }
+
+      for (uint8_t j = 0; j < 32; j++) {
+        rx[j] = (uint8_t)~rx[j];
+      }
+
+      if (packet_matches_data_ack(rx, seq_num)) {
+        DEBUG_PRINT("[ACK] OK(inv) try:%d\r\n", attempt);
+        return TX_WAIT_ACK_RECEIVED;
+      }
+    }
+
+    if (g_sensor_event_pending) {
+      g_sensor_event_pending = 0;
+      *latest_level = sample_filtered_level(runtime);
+      if (*latest_level != sent_level) {
+        DEBUG_PRINT("[TX] Lvl update during TX: %d%%\r\n",
+                    *latest_level);
+        return TX_WAIT_LEVEL_CHANGED;
+      }
+    }
+
+    if (g_button_event_pending || runtime->button_press_start != 0 ||
+        GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+      g_button_event_pending = 0;
+      button_action_t action = poll_button_action(runtime);
+      if (action != BUTTON_ACTION_NONE) {
+        handle_button_action(runtime, action);
+        return TX_WAIT_ABORTED;
+      }
+    }
+
+    Delay_Ms(1);
+  }
+
+  return TX_WAIT_TIMEOUT;
+}
+
+static void prepare_data_packet(uint8_t *packet, uint8_t current_level) {
+  memset(packet, 0, 32);
+
+  packet[0] = 0xAA;
+  packet[1] = 0x55;
+  packet[2] = 0x02;
+  packet[3] = 32;
+  packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
+  packet[5] = (uint8_t)(g_settings.tank_id >> 8);
+  packet[6] = current_level;
+  packet[7] = g_runtime.current_battery;
+
+  packet[8] = 0;
+  if (g_runtime.current_battery <= BATTERY_LOW_THRESHOLD) {
+    packet[8] |= 0x01; // Low Battery Flag
+  }
+
+  packet[9] = g_probe_fault;
+  packet[12] = (uint8_t)(g_runtime.seq_num & 0xFF);
+  packet[13] = (uint8_t)((g_runtime.seq_num >> 8) & 0xFF);
+  packet[14] = (uint8_t)((g_runtime.seq_num >> 16) & 0xFF);
+  packet[15] = (uint8_t)((g_runtime.seq_num >> 24) & 0xFF);
+  packet[31] = calculate_checksum(packet, 32);
+}
+
+static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
+                                             uint8_t *packet,
+                                             uint8_t *current_level) {
+  nrf24_init();
+
+  for (uint8_t attempt = 0; attempt < DATA_MAX_RETRIES; attempt++) {
+    nrf24_power_up_tx();
+    nrf24_set_tx_addr(PAIRING_ADDR);
+
+    for (int burst = 0; burst < 3; burst++) {
+      nrf24_send(packet, 32);
+
+      tx_wait_result_t gap_result =
+          service_runtime_window(runtime, 10, false, attempt,
+                                 runtime->seq_num, *current_level,
+                                 current_level);
+      if (gap_result == TX_WAIT_LEVEL_CHANGED) {
+        nrf24_power_down();
+        return TX_SEND_RESTART_LEVEL;
+      }
+      if (gap_result == TX_WAIT_ABORTED) {
+        nrf24_power_down();
+        return TX_SEND_ABORTED;
+      }
+    }
+
+    if (attempt == 0) {
+      DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n",
+                  (unsigned long)runtime->seq_num, attempt);
+    }
+
+    nrf24_flush_rx();
+    nrf24_power_up_rx();
+
+    tx_wait_result_t ack_result =
+        service_runtime_window(runtime, DATA_ACK_WAIT_MS, true,
+                               attempt, runtime->seq_num,
+                               *current_level, current_level);
+    if (ack_result == TX_WAIT_ACK_RECEIVED) {
+      nrf24_power_down();
+      return TX_SEND_ACKED;
+    }
+    if (ack_result == TX_WAIT_LEVEL_CHANGED) {
+      nrf24_power_down();
+      return TX_SEND_RESTART_LEVEL;
+    }
+    if (ack_result == TX_WAIT_ABORTED) {
+      nrf24_power_down();
+      return TX_SEND_ABORTED;
+    }
+
+    if (attempt < DATA_MAX_RETRIES - 1) {
+      tx_wait_result_t retry_result =
+          service_runtime_window(runtime, DATA_RETRY_DELAY_MS,
+                                 false, attempt, runtime->seq_num,
+                                 *current_level, current_level);
+      if (retry_result == TX_WAIT_LEVEL_CHANGED) {
+        nrf24_power_down();
+        return TX_SEND_RESTART_LEVEL;
+      }
+      if (retry_result == TX_WAIT_ABORTED) {
+        nrf24_power_down();
+        return TX_SEND_ABORTED;
+      }
+    }
+  }
+
+  nrf24_power_down();
+  return TX_SEND_NO_ACK;
+}
 
 /* ========== TIM2 for millis (1ms) ========== */
 void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -665,276 +1015,124 @@ int main(void) {
 
   DEBUG_PRINT("[SYS] Idle (Hold btn=pair)\r\n");
 
-  uint32_t button_press_start = 0;
-  bool pairing_triggered = false;
-  uint16_t sleep_cycle_count = 0;
-
-  // Trackers (Must be reset on pairing)
-  uint32_t seq_num = 0;
-  uint8_t last_sent_level = 0xFF;
-  uint8_t filtered_level = 0;
-  uint8_t stable_counter = 0;
-  bool first_reading_done = false;
-  uint8_t current_battery = 0;
-  uint8_t retry_cooldown = 0; // AWU cycles to wait before retry after ACK fail
+  reset_runtime_tracking(&g_runtime);
 
   while (1) {
     // 1. Button Handling
-    if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
-      if (button_press_start == 0) {
-        button_press_start = millis();
-        DEBUG_PRINT("[SYSTEM] Button Pressed\r\n");
+    if (g_button_event_pending || g_runtime.button_press_start != 0 ||
+        GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+      g_button_event_pending = 0;
+
+      button_action_t button_action = poll_button_action(&g_runtime);
+      if (button_action != BUTTON_ACTION_NONE) {
+        handle_button_action(&g_runtime, button_action);
+        continue;
       }
 
-      uint32_t held_ms = millis() - button_press_start;
-
-      // --- FACTORY RESET (Long Press >= 5s) ---
-      if (!pairing_triggered && held_ms > RESET_PRESS_TIME_MS) {
-        DEBUG_PRINT(
-            "[SYS] FACTORY RESET\r\n");
-        pairing_triggered = true;
-
-        // Sync Unpair with Receiver before reset
-        if (g_settings.pairing_status == 1 && g_settings.tank_id != 0) {
-          DEBUG_PRINT(
-              "Sending UNPAIR before reset\r\n");
-          uint8_t unpair_pkt[32] = {0};
-          unpair_pkt[0] = 0xAA;
-          unpair_pkt[1] = 0x55;
-          unpair_pkt[2] = 0x06; // PKT_TYPE_UNPAIR
-          unpair_pkt[3] = 32;
-          unpair_pkt[4] = (uint8_t)(g_settings.tank_id & 0xFF);
-          unpair_pkt[5] = (uint8_t)(g_settings.tank_id >> 8);
-          unpair_pkt[31] = calculate_checksum(unpair_pkt, 32);
-
-          nrf24_power_up_tx();
-          nrf24_set_tx_addr(PAIRING_ADDR);
-          for (int i = 0; i < 20; i++) {
-            nrf24_send(unpair_pkt, 32);
-            Delay_Ms(30);
-          }
-          nrf24_power_down();
-        }
-
-        g_settings.tank_id = 0;
-        g_settings.pairing_status = 0;
-        flash_save_settings();
-
-        // Reset local trackers
-        seq_num = 0;
-        last_sent_level = 0xFF;
-        first_reading_done = false;
-
-        run_pairing(); // Enters pairing mode broadcast for 30s
-      }
-      Delay_Ms(10);
-      continue; // Don't sleep while button is held
-    } else {
-      // Button Released
-      if (button_press_start != 0) {
-        uint32_t held_ms = millis() - button_press_start;
-
-        if (!pairing_triggered && held_ms > 10 &&
-            held_ms < RESET_PRESS_TIME_MS) {
-          if (g_settings.pairing_status == 0) {
-            // --- NOT PAIRED: Short click starts pairing ---
-            DEBUG_PRINT("[SYS] Click -> Pair\r\n");
-            run_pairing();
-          } else {
-            // --- PAIRED: Short click resets MCU ---
-            DEBUG_PRINT("[SYS] Click -> Reset\r\n");
-            Delay_Ms(100);
-            NVIC->SCTLR |= (1 << 31); // SYSRESETREQ
-          }
-        }
-
-        button_press_start = 0;
-        pairing_triggered = false;
+      if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+        Delay_Ms(10);
+        continue;
       }
     }
 
     // 2. Data Logic (Only if paired)
     if (g_settings.pairing_status == 1) {
-      uint8_t raw_level = read_tank_level();
-
-      // --- Water Ripple Filter (Stable Level) ---
-      if (!first_reading_done) {
-        // First time after boot: Bypass filter to show instant result
-        filtered_level = raw_level;
-        first_reading_done = true;
-        stable_counter = 0;
-        DEBUG_PRINT("[SYSTEM] Init Level: %d%%\r\n",
-                    filtered_level);
-      } else {
-        // In Sleep Mode, we want faster updates.
-        // If level changed, we only wait 1 cycle (approx 10s)
-        if (raw_level == filtered_level) {
-          stable_counter = 0; // Already stable
-        } else {
-          stable_counter++;
-          if (stable_counter >= 1) { // INSTANT UPDATE (1 cycle only)
-            filtered_level = raw_level;
-            stable_counter = 0;
-            DEBUG_PRINT("[SYS] LvlChg: %d%%\r\n",
-                        filtered_level);
-          }
-        }
-      }
-
-      uint8_t current_level = filtered_level;
-      bool level_changed = (current_level != last_sent_level);
-      bool heartbeat_due = (sleep_cycle_count >= HEARTBEAT_CYCLES);
+      uint8_t current_level = sample_filtered_level(&g_runtime);
+      bool level_changed = (current_level != g_runtime.last_sent_level);
+      bool heartbeat_due =
+          (g_runtime.sleep_cycle_count >= HEARTBEAT_CYCLES);
 
       // --- Battery Internal Logic ---
-      if (last_sent_level == 0xFF || heartbeat_due) {
-        current_battery = read_battery_level();
-        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n", current_battery);
+      if (g_runtime.last_sent_level == 0xFF || heartbeat_due) {
+        g_runtime.current_battery = read_battery_level();
+        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n",
+                    g_runtime.current_battery);
         Delay_Ms(100); // stabilize battery reading
       }
 
       // Send if: First time OR Level changed OR 4 hours heartbeat
       // But respect cooldown after failed ACK (wait ~1 min)
-      bool need_send = (last_sent_level == 0xFF || level_changed || heartbeat_due);
+      bool need_send =
+          (g_runtime.last_sent_level == 0xFF || level_changed ||
+           heartbeat_due);
 
       if (level_changed) {
         // New data! Reset cooldown immediately
-        retry_cooldown = 0;
-      } else if (need_send && retry_cooldown > 0) {
-        retry_cooldown--;
-        if (retry_cooldown > 0) {
+        g_runtime.retry_cooldown = 0;
+      } else if (need_send && g_runtime.retry_cooldown > 0) {
+        g_runtime.retry_cooldown--;
+        if (g_runtime.retry_cooldown > 0) {
           need_send = false; // Still cooling down, skip this wake
-          DEBUG_PRINT("[TX] Cooldown %d\r\n", retry_cooldown);
+          DEBUG_PRINT("[TX] Cooldown %d\r\n",
+                      g_runtime.retry_cooldown);
         }
       }
 
       if (need_send) {
         uint8_t packet[32];
-        for (int i = 0; i < 32; i++)
-          packet[i] = 0; // Absolute Zero-Fill
-
-        packet[0] = 0xAA;
-        packet[1] = 0x55;
-        packet[2] = 0x02;
-        packet[3] = 32;
-        packet[4] = (uint8_t)(g_settings.tank_id & 0xFF);
-        packet[5] = (uint8_t)(g_settings.tank_id >> 8);
-        packet[6] = current_level;
-        packet[7] = (uint8_t)current_battery;
-
-        packet[8] = 0;
-        if (current_battery <= BATTERY_LOW_THRESHOLD)
-          packet[8] |= 0x01; // Low Battery Flag
-
-        packet[9] = g_probe_fault; // Probe Fault status (1 or 0)
-
-        packet[12] = (uint8_t)(seq_num & 0xFF);
-        packet[13] = (uint8_t)((seq_num >> 8) & 0xFF);
-        packet[14] = (uint8_t)((seq_num >> 16) & 0xFF);
-        packet[15] = (uint8_t)((seq_num >> 24) & 0xFF);
-        packet[31] = calculate_checksum(packet, 32);
-
-        DEBUG_PRINT("[TX] %s Seq:%lu L:%d%% B:%d%% F:%d\r\n",
-                    level_changed ? "CHG" : "HB",
-                    (unsigned long)seq_num, current_level, current_battery,
-                    g_probe_fault);
-
-        // --- DATA TX WITH ACK + RETRY ---
-        nrf24_init();
         bool ack_received = false;
+        bool tx_aborted = false;
+        bool send_attempted = false;
+        bool show_tx_feedback = false;
 
-        for (uint8_t attempt = 0; attempt < DATA_MAX_RETRIES && !ack_received;
-             attempt++) {
-          // TX: Send 3x burst
-          nrf24_power_up_tx();
-          nrf24_set_tx_addr(PAIRING_ADDR);
-          for (int b = 0; b < 3; b++) {
-            nrf24_send(packet, 32);
-            Delay_Ms(10);
+        while (1) {
+          level_changed =
+              (current_level != g_runtime.last_sent_level);
+          if (!(g_runtime.last_sent_level == 0xFF || level_changed ||
+                heartbeat_due)) {
+            break;
           }
 
-          if (attempt == 0)
-            DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n",
-                        (unsigned long)seq_num, attempt);
+          prepare_data_packet(packet, current_level);
+          DEBUG_PRINT("[TX] %s Seq:%lu L:%d%% B:%d%% F:%d\r\n",
+                      level_changed ? "CHG" : "HB",
+                      (unsigned long)g_runtime.seq_num,
+                      current_level, g_runtime.current_battery,
+                      g_probe_fault);
 
-          // RX: Listen for DATA-ACK from controller
-          nrf24_flush_rx();
-          nrf24_power_up_rx();
+          send_attempted = true;
+          tx_send_result_t tx_result =
+              send_data_with_retry(&g_runtime, packet, &current_level);
 
-          uint32_t start = millis();
-          while ((millis() - start) < DATA_ACK_WAIT_MS) {
-            if (nrf24_available()) {
-              uint8_t rx[32];
-              nrf24_read(rx, 32);
-
-              // Check normal sync + PKT_TYPE_ACK
-              if (rx[0] == 0xAA && rx[1] == 0x55 &&
-                  rx[2] == PKT_TYPE_DATA_ACK) {
-                uint8_t crc = calculate_checksum(rx, 32);
-                uint16_t ack_id = (uint16_t)rx[4] | ((uint16_t)rx[5] << 8);
-                uint32_t ack_seq = (uint32_t)rx[6] | ((uint32_t)rx[7] << 8) |
-                                   ((uint32_t)rx[8] << 16) |
-                                   ((uint32_t)rx[9] << 24);
-
-                if (crc == rx[31] && ack_id == g_settings.tank_id &&
-                    ack_seq == seq_num) {
-                  ack_received = true;
-                  DEBUG_PRINT("[ACK] OK try:%d\r\n", attempt);
-                  break;
-                }
-              }
-
-              // Check inverted sync
-              {
-                uint8_t inv[32];
-                for (int j = 0; j < 32; j++)
-                  inv[j] = ~rx[j];
-                if (inv[0] == 0xAA && inv[1] == 0x55 &&
-                    inv[2] == PKT_TYPE_DATA_ACK) {
-                  uint8_t crc = calculate_checksum(inv, 32);
-                  uint16_t ack_id =
-                      (uint16_t)inv[4] | ((uint16_t)inv[5] << 8);
-                  uint32_t ack_seq =
-                      (uint32_t)inv[6] | ((uint32_t)inv[7] << 8) |
-                      ((uint32_t)inv[8] << 16) | ((uint32_t)inv[9] << 24);
-
-                  if (crc == inv[31] && ack_id == g_settings.tank_id &&
-                      ack_seq == seq_num) {
-                    ack_received = true;
-                    DEBUG_PRINT("[ACK] OK(inv) try:%d\r\n", attempt);
-                    break;
-                  }
-                }
-              }
-            }
-            Delay_Ms(1);
+          if (tx_result == TX_SEND_RESTART_LEVEL) {
+            g_runtime.retry_cooldown = 0;
+            g_runtime.seq_num++;
+            continue;
           }
 
-          if (!ack_received && attempt < DATA_MAX_RETRIES - 1)
-            Delay_Ms(DATA_RETRY_DELAY_MS);
+          if (tx_result == TX_SEND_ABORTED) {
+            tx_aborted = true;
+            break;
+          }
+
+          ack_received = (tx_result == TX_SEND_ACKED);
+          show_tx_feedback = true;
+          if (!ack_received) {
+            DEBUG_PRINT("[TX] NO ACK after %d tries\r\n",
+                        DATA_MAX_RETRIES);
+            g_runtime.retry_cooldown = 4;
+          } else {
+            g_runtime.last_sent_level = current_level;
+            g_runtime.seq_num++;
+            g_runtime.retry_cooldown = 0;
+          }
+          break;
         }
 
-        if (!ack_received)
-          DEBUG_PRINT("[TX] NO ACK after %d tries\r\n",
-                      DATA_MAX_RETRIES);
-
-        if (ack_received) {
-          // ACK received: update state, increment seq
-          last_sent_level = current_level;
-          seq_num++;
-          retry_cooldown = 0;
-        } else {
-          // No ACK: DON'T update last_sent_level so level_changed stays true
-          // Wait ~1 min (4 AWU cycles x 15s) before retrying
-          retry_cooldown = 4;
+        if (tx_aborted) {
+          continue;
         }
-        sleep_cycle_count = 0;
 
-        nrf24_power_down();
+        if (send_attempted) {
+          g_runtime.sleep_cycle_count = 0;
 
-        // LED: fast blink=ACK ok, slow blink=no ACK
-        GPIO_ResetBits(GPIOD, LED_PIN);
-        Delay_Ms(ack_received ? 50 : 500);
-        GPIO_SetBits(GPIOD, LED_PIN);
+          if (show_tx_feedback) {
+            // LED: fast blink=ACK ok, slow blink=no ACK
+            GPIO_ResetBits(GPIOD, LED_PIN);
+            Delay_Ms(ack_received ? 50 : 500);
+            GPIO_SetBits(GPIOD, LED_PIN);
+          }
+        }
       }
     } else {
       DEBUG_PRINT("[SYS] Not paired\r\n");
@@ -947,6 +1145,6 @@ int main(void) {
       DEBUG_PRINT("----------\r\n");
     }
     enter_deep_sleep();
-    sleep_cycle_count++; // Increment cycles on each AWU wake
+    g_runtime.sleep_cycle_count++; // Increment cycles on each AWU wake
   }
 }
