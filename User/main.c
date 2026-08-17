@@ -62,7 +62,8 @@ typedef struct {
   uint8_t pending_level;
   uint8_t wake_retry_count;
   uint8_t filtered_level;
-  uint8_t stable_counter;
+  uint8_t candidate_level;
+  uint8_t candidate_count;
   bool first_reading_done;
   uint8_t current_battery;
   uint8_t retry_cooldown;
@@ -275,7 +276,8 @@ static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->pending_level = 0xFF;
   runtime->wake_retry_count = 0;
   runtime->filtered_level = 0;
-  runtime->stable_counter = 0;
+  runtime->candidate_level = 0xFF;
+  runtime->candidate_count = 0;
   runtime->first_reading_done = false;
   runtime->current_battery = 0;
   runtime->retry_cooldown = 0;
@@ -291,17 +293,39 @@ static uint8_t sample_filtered_level(runtime_state_t *runtime) {
 
   if (!runtime->first_reading_done) {
     runtime->filtered_level = raw_level;
+    runtime->candidate_level = raw_level;
+    runtime->candidate_count = 0;
     runtime->first_reading_done = true;
-    runtime->stable_counter = 0;
     DEBUG_PRINT("[SYSTEM] Init Level: %d%%\r\n", runtime->filtered_level);
   } else if (raw_level == runtime->filtered_level) {
-    runtime->stable_counter = 0;
+    // Level is steady and matches confirmed level -> reset candidate tracking
+    runtime->candidate_count = 0;
+    runtime->candidate_level = raw_level;
   } else {
-    runtime->stable_counter++;
-    if (runtime->stable_counter >= 1) {
-      runtime->filtered_level = raw_level;
-      runtime->stable_counter = 0;
-      DEBUG_PRINT("[SYS] LvlChg: %d%%\r\n", runtime->filtered_level);
+    // Raw level differs from current confirmed level
+    if (raw_level == runtime->candidate_level) {
+      runtime->candidate_count++;
+      DEBUG_PRINT("[SYS] Candidate Lvl %d%% hold (%d/%d)\r\n",
+                  runtime->candidate_level, runtime->candidate_count,
+                  LEVEL_DEBOUNCE_CYCLES);
+
+      if (runtime->candidate_count >= LEVEL_DEBOUNCE_CYCLES) {
+        runtime->filtered_level = runtime->candidate_level;
+        runtime->candidate_count = 0;
+        DEBUG_PRINT("[SYS] Lvl Confirmed: %d%%\r\n", runtime->filtered_level);
+      }
+    } else {
+      // First time seeing this new level -> start candidate tracking
+      runtime->candidate_level = raw_level;
+      runtime->candidate_count = 1;
+      DEBUG_PRINT("[SYS] New Candidate Lvl %d%% (1/%d)\r\n",
+                  runtime->candidate_level, LEVEL_DEBOUNCE_CYCLES);
+
+#if (LEVEL_DEBOUNCE_CYCLES <= 1)
+      runtime->filtered_level = runtime->candidate_level;
+      runtime->candidate_count = 0;
+      DEBUG_PRINT("[SYS] Lvl Confirmed: %d%%\r\n", runtime->filtered_level);
+#endif
     }
   }
 
@@ -554,10 +578,8 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
     }
 #endif
 
-    if (attempt == 0) {
-      DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n", (unsigned long)runtime->seq_num,
-                  attempt);
-    }
+    DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n", (unsigned long)runtime->seq_num,
+                attempt);
 
     radio_flush_rx();
     radio_power_up_rx();
@@ -579,8 +601,10 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
     update_link_quality(runtime, attempt, false, rpd_seen);
 
     if (attempt < DATA_MAX_RETRIES - 1) {
+      uint32_t retry_jitter_ms =
+          DATA_RETRY_DELAY_MS + ((millis() + attempt) & 0x1F) * 2;
       tx_wait_result_t retry_result = service_runtime_window(
-          runtime, DATA_RETRY_DELAY_MS, false, attempt, runtime->seq_num);
+          runtime, retry_jitter_ms, false, attempt, runtime->seq_num);
       if (retry_result == TX_WAIT_ABORTED) {
         radio_power_down();
         return TX_SEND_ABORTED;
@@ -685,11 +709,11 @@ void gpio_init(void) {
 uint8_t read_internal_probes(uint8_t *fault_out) {
   // 1. Power ON the common probe wire (PD3)
   GPIO_SetBits(GPIOD, SENSOR_POWER_PIN);
-  Delay_Ms(15); // Allow water conductivity & transistor junction to stabilize
+  Delay_Ms(PROBE_SETTLE_DELAY_MS); // Allow water conductivity & transistor junction to stabilize
 
-  // 2. Take 5 multi-samples over 10ms to filter contact resistance & AC ripple
+  // 2. Take multi-samples to filter contact resistance & AC ripple
   uint8_t c25 = 0, c50 = 0, c75 = 0, c100 = 0;
-  for (int s = 0; s < 5; s++) {
+  for (int s = 0; s < PROBE_SAMPLE_COUNT; s++) {
     if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0)
       c25++;
     if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0)
@@ -703,15 +727,16 @@ uint8_t read_internal_probes(uint8_t *fault_out) {
 
   // 3. Power OFF probe wire immediately (keeps average power < 0.01mW)
   GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN);
+  Delay_Ms(1); // Settle & drain residual wire capacitance
 
-  // Majority vote: if at least 2 out of 5 samples detected LOW (transistor ON), probe is wet
-  uint8_t p25 = (c25 >= 2);
-  uint8_t p50 = (c50 >= 2);
-  uint8_t p75 = (c75 >= 2);
-  uint8_t p100 = (c100 >= 2);
+  // Majority vote: >= PROBE_MAJORITY_VOTE out of PROBE_SAMPLE_COUNT (e.g. >= 3 out of 5)
+  uint8_t p25 = (c25 >= PROBE_MAJORITY_VOTE);
+  uint8_t p50 = (c50 >= PROBE_MAJORITY_VOTE);
+  uint8_t p75 = (c75 >= PROBE_MAJORITY_VOTE);
+  uint8_t p100 = (c100 >= PROBE_MAJORITY_VOTE);
 
-  DEBUG_PRINT("[PROBES] Raw hits (out of 5): [25%%]:%d [50%%]:%d [75%%]:%d [100%%]:%d\r\n",
-              c25, c50, c75, c100);
+  DEBUG_PRINT("[PROBES] Raw hits (out of %d): [25%%]:%d [50%%]:%d [75%%]:%d [100%%]:%d\r\n",
+              PROBE_SAMPLE_COUNT, c25, c50, c75, c100);
 
   // --- FAULT DETECTION LOGIC: Bitmask Mode ---
   uint8_t fault_mask = 0;

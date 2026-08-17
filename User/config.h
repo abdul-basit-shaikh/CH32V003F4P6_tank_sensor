@@ -54,6 +54,10 @@
 #define SENSOR_POWER_PIN        GPIO_Pin_3 // PD3 (Pin 20)
 
 // Sensor Logic Constants
+#define LEVEL_DEBOUNCE_CYCLES   2  // Consecutive wake cycles required to confirm level change (~10s anti-slosh)
+#define PROBE_SAMPLE_COUNT      5  // Number of multi-samples per reading
+#define PROBE_MAJORITY_VOTE     3  // >= 3 out of 5 (> 50% true majority) to declare probe wet
+#define PROBE_SETTLE_DELAY_MS   3  // Probe stabilization delay in ms (optimized for low power)
 #define BATTERY_LOW_THRESHOLD   25 // Warn at ~2.85V for the 2.7V-3.3V range
 #define SENSOR_ERROR_VAL        0xFE
 
@@ -99,8 +103,8 @@ extern const uint8_t PAIRING_ADDR[3];
 
 // Data ACK Configuration
 #define DATA_ACK_WAIT_MS                        400 // Time to listen for data ACK after each TX
-#define DATA_MAX_RETRIES                        15     // Max retries if no ACK received
-#define DATA_RETRY_DELAY_MS                     100 // Delay between retries
+#define DATA_MAX_RETRIES                        8   // Max retries if no ACK received (balanced for battery & range)
+#define DATA_RETRY_DELAY_MS                     120 // Base delay between retries
 #define PKT_TYPE_DATA_ACK                       0x03  // ACK packet type from controller
 
 // Timing
