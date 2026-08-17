@@ -9,9 +9,34 @@
 #include "ch32v00x_usart.h"
 #include "config.h"
 #include "debug.h"
-#include "nrf24_simple.h"
 #include <stdint.h>
 #include <string.h>
+
+#if USE_WIRELESS_LORA
+#include "lora_sx1278.h"
+#define radio_init() lora_init()
+#define radio_send(buf, len) lora_send(buf, len)
+#define radio_available() lora_available()
+#define radio_read(buf, len) lora_read(buf, len)
+#define radio_power_up_tx() lora_power_up_tx()
+#define radio_power_up_rx() lora_power_up_rx()
+#define radio_power_down() lora_power_down()
+#define radio_flush_rx() ((void)0)
+#define radio_set_tx_addr(a) ((void)0)
+#define radio_take_rpd() (1)
+#else
+#include "nrf24_simple.h"
+#define radio_init() nrf24_init()
+#define radio_send(buf, len) nrf24_send(buf, len)
+#define radio_available() nrf24_available()
+#define radio_read(buf, len) nrf24_read(buf, len)
+#define radio_power_up_tx() nrf24_power_up_tx()
+#define radio_power_up_rx() nrf24_power_up_rx()
+#define radio_power_down() nrf24_power_down()
+#define radio_flush_rx() nrf24_flush_rx()
+#define radio_set_tx_addr(a) nrf24_set_tx_addr(a)
+#define radio_take_rpd() nrf24_take_rpd_latched()
+#endif
 
 /* ========== Function Prototypes ========== */
 void gpio_init(void);
@@ -26,7 +51,7 @@ uint8_t read_tank_level(void);
 uint8_t read_battery_level(void);
 void run_pairing(void);
 uint32_t millis(void);
-uint8_t calculate_checksum(uint8_t *data, uint8_t length);
+uint8_t calculate_checksum(const uint8_t *data, uint8_t length);
 
 typedef struct {
   uint32_t button_press_start;
@@ -39,6 +64,9 @@ typedef struct {
   bool first_reading_done;
   uint8_t current_battery;
   uint8_t retry_cooldown;
+  uint8_t link_quality;
+  uint8_t last_rpd_seen;
+  bool link_quality_valid;
 } runtime_state_t;
 
 typedef enum {
@@ -70,15 +98,10 @@ void pwr_sleep_init(void) {
   // Enable PWR clock
   RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
 
-  // Configure AWU (Auto Wake-up)
+  // Configure LSI for AWU
   RCC_LSICmd(ENABLE);
   while (RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET)
     ;
-
-  // Set AWU prescaler and window for ~10s wake-up (Faster response)
-  PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
-  PWR_AWU_SetWindowValue(8);
-  PWR_AutoWakeUpCmd(ENABLE);
 
   // Enable AWU interrupt in NVIC
   NVIC_InitTypeDef NVIC_InitStructure = {0};
@@ -91,8 +114,8 @@ void pwr_sleep_init(void) {
 
 void AWU_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void AWU_IRQHandler(void) {
-  // AWU does not have a specific IT pending bit to clear in most V003 versions,
-  // it's cleared by hardware or by the wake-up process.
+  EXTI_ClearITPendingBit(EXTI_Line9);
+  NVIC_ClearPendingIRQ(AWU_IRQn);
 }
 
 void exti_init(void) {
@@ -120,7 +143,14 @@ void exti_init(void) {
   EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
   EXTI_Init(&EXTI_InitStructure);
 
-  // Enable NVIC for EXTI Line 7-0
+  // Auto Wake-up (AWU) Event on EXTI Line 9 (Crucial for AWU wakeup!)
+  EXTI_InitStructure.EXTI_Line = EXTI_Line9;
+  EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
+  EXTI_InitStructure.EXTI_LineCmd = ENABLE;
+  EXTI_Init(&EXTI_InitStructure);
+
+  // Enable NVIC for EXTI Line 7-0 and AWU
   NVIC_InitTypeDef NVIC_InitStructure = {0};
   NVIC_InitStructure.NVIC_IRQChannel = EXTI7_0_IRQn;
   NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
@@ -148,32 +178,42 @@ void EXTI7_0_IRQHandler(void) {
 }
 
 void enter_deep_sleep(void) {
-  DEBUG_PRINT("[PWR] Sleep\r\n");
-  Delay_Ms(50); // Increased UART flush time
+  DEBUG_PRINT("[PWR] Sleep (5s AWU)...\r\n");
+  Delay_Ms(30); // Flush UART
 
-  // Clear pending flags for a clean start
+  // 1. Re-arm Auto Wakeup (AWU) timer before EVERY sleep
+  RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
+  PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
+  PWR_AWU_SetWindowValue(10); // ~5 seconds periodic wake-up
+  PWR_AutoWakeUpCmd(ENABLE);  // Arm the downcounter
+
+  // 2. Clear all previous pending interrupt flags
   EXTI->INTFR = 0xFFFFFFFF;
+  EXTI_ClearITPendingBit(EXTI_Line9);
+  NVIC_ClearPendingIRQ(AWU_IRQn);
+  NVIC_ClearPendingIRQ(EXTI7_0_IRQn);
 
-  // Use "Stop" mode (SLEEPDEEP=1, PDDS=0)
-  // This mode allows EXTI (Sensor changes) to wake up the MCU
+  // 3. Enter Stop mode (SLEEPDEEP=1, PDDS=0)
   PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
   NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
 
-  __WFI(); // Wait for Interrupt (AWU or EXTI)
+  __WFI(); // Wait for Interrupt (AWU timer fires in 5s OR user presses button)
 
-  NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP after wakeup
+  // 4. Cleanup sleep state
+  NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP
+  PWR_AutoWakeUpCmd(DISABLE);
+  EXTI_ClearITPendingBit(EXTI_Line9);
+  NVIC_ClearPendingIRQ(AWU_IRQn);
 
-  // System resumes here after wake up
+  // 5. System resumes here after wake up
   SystemCoreClockUpdate();
-
-  // Clear flags again after waking to prevent fast loops
   EXTI->INTFR = 0xFFFFFFFF;
 
   DEBUG_PRINT("[PWR] Wake\r\n");
 
-  // Visual confirmation of wakeup
+  // Visual confirmation of wakeup (brief 20ms LED blink)
   GPIO_ResetBits(GPIOD, LED_PIN); // Blink ON
-  Delay_Ms(50);
+  Delay_Ms(20);
   GPIO_SetBits(GPIOD, LED_PIN); // Blink OFF
 
   // Essential re-init after deep sleep
@@ -181,11 +221,10 @@ void enter_deep_sleep(void) {
                              RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1 |
                              RCC_APB2Periph_AFIO,
                          ENABLE);
-  gpio_init(); // Re-init all GPIO modes correctly (also calls exti_init)
-  adc_init();  // Re-calibrate ADC after wake up
-  exti_init(); // Re-enable EXTI wake triggers
+  gpio_init();
+  adc_init();
 
-  Delay_Ms(200); // Stabilization delay
+  Delay_Ms(50); // Short stabilization delay
 }
 
 /* ========== Flash Storage (Last Page 64-byte) ========== */
@@ -216,8 +255,8 @@ void flash_save_settings(void) {
     FLASH_ProgramWord(SETTINGS_FLASH_ADDR + (i * 4), pData[i]);
   }
   FLASH_Lock();
-  DEBUG_PRINT("[FL] Saved ID:0x%04X S:%d\r\n",
-              g_settings.tank_id, g_settings.pairing_status);
+  DEBUG_PRINT("[FL] Saved ID:0x%04X S:%d\r\n", g_settings.tank_id,
+              g_settings.pairing_status);
 }
 
 /* ========== Global Variables ========== */
@@ -225,6 +264,10 @@ const uint8_t PAIRING_ADDR[3] = {0xE7, 0xE7,
                                  0xE7}; // Address for pairing packets
 volatile uint32_t g_millis = 0;         // Current system time in ms
 uint8_t g_probe_fault = 0; // 1 = Fault detected (e.g., gap in readings)
+
+static inline bool is_button_pressed(void) {
+  return GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0;
+}
 
 static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->button_press_start = 0;
@@ -237,6 +280,9 @@ static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->first_reading_done = false;
   runtime->current_battery = 0;
   runtime->retry_cooldown = 0;
+  runtime->link_quality = 0;
+  runtime->last_rpd_seen = 0;
+  runtime->link_quality_valid = false;
   g_sensor_event_pending = 0;
   g_button_event_pending = 0;
 }
@@ -248,8 +294,7 @@ static uint8_t sample_filtered_level(runtime_state_t *runtime) {
     runtime->filtered_level = raw_level;
     runtime->first_reading_done = true;
     runtime->stable_counter = 0;
-    DEBUG_PRINT("[SYSTEM] Init Level: %d%%\r\n",
-                runtime->filtered_level);
+    DEBUG_PRINT("[SYSTEM] Init Level: %d%%\r\n", runtime->filtered_level);
   } else if (raw_level == runtime->filtered_level) {
     runtime->stable_counter = 0;
   } else {
@@ -257,23 +302,69 @@ static uint8_t sample_filtered_level(runtime_state_t *runtime) {
     if (runtime->stable_counter >= 1) {
       runtime->filtered_level = raw_level;
       runtime->stable_counter = 0;
-      DEBUG_PRINT("[SYS] LvlChg: %d%%\r\n",
-                  runtime->filtered_level);
+      DEBUG_PRINT("[SYS] LvlChg: %d%%\r\n", runtime->filtered_level);
     }
   }
 
   return runtime->filtered_level;
 }
 
+static uint8_t build_link_quality_sample(uint8_t attempt, bool ack_received,
+                                         bool rpd_seen) {
+  if (!ack_received) {
+    return rpd_seen ? 10 : 0;
+  }
+
+  uint8_t max_attempt = (DATA_MAX_RETRIES > 0) ? (DATA_MAX_RETRIES - 1) : 0;
+  if (attempt > max_attempt) {
+    attempt = max_attempt;
+  }
+
+  uint8_t penalty = 0;
+  if (max_attempt > 0) {
+    penalty = (uint8_t)(((uint16_t)attempt * 80U) / (uint16_t)max_attempt);
+  }
+
+  uint8_t score = (uint8_t)(100U - penalty);
+  if (score < 20U) {
+    score = 20U;
+  }
+
+  if (rpd_seen && score < 100U) {
+    uint8_t boosted = (uint8_t)(score + 8U);
+    score = (boosted > 100U) ? 100U : boosted;
+  }
+
+  return score;
+}
+
+static void update_link_quality(runtime_state_t *runtime, uint8_t attempt,
+                                bool ack_received, bool rpd_seen) {
+  uint8_t sample = build_link_quality_sample(attempt, ack_received, rpd_seen);
+  runtime->last_rpd_seen = rpd_seen ? 1 : 0;
+
+  if (!runtime->link_quality_valid) {
+    runtime->link_quality = sample;
+    runtime->link_quality_valid = true;
+    return;
+  }
+
+  runtime->link_quality =
+      (uint8_t)((((uint16_t)runtime->link_quality * 3U) + sample + 2U) / 4U);
+}
+
 static button_action_t poll_button_action(runtime_state_t *runtime) {
-  if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+  bool button_pressed = is_button_pressed();
+
+  if (button_pressed) {
+    uint32_t now = millis();
     if (runtime->button_press_start == 0) {
-      runtime->button_press_start = millis();
+      runtime->button_press_start = now;
       DEBUG_PRINT("[SYSTEM] Button Pressed\r\n");
     }
 
     if (!runtime->pairing_triggered &&
-        (millis() - runtime->button_press_start) > RESET_PRESS_TIME_MS) {
+        (now - runtime->button_press_start) > RESET_PRESS_TIME_MS) {
       runtime->pairing_triggered = true;
       return BUTTON_ACTION_FACTORY_RESET;
     }
@@ -314,13 +405,13 @@ static void send_unpair_before_reset(void) {
   unpair_pkt[5] = (uint8_t)(g_settings.tank_id >> 8);
   unpair_pkt[31] = calculate_checksum(unpair_pkt, 32);
 
-  nrf24_power_up_tx();
-  nrf24_set_tx_addr(PAIRING_ADDR);
+  radio_power_up_tx();
+  radio_set_tx_addr(PAIRING_ADDR);
   for (int i = 0; i < 20; i++) {
-    nrf24_send(unpair_pkt, 32);
+    radio_send(unpair_pkt, 32);
     Delay_Ms(30);
   }
-  nrf24_power_down();
+  radio_power_down();
 }
 
 static void handle_button_action(runtime_state_t *runtime,
@@ -360,29 +451,28 @@ static bool packet_matches_data_ack(uint8_t *packet, uint32_t seq_num) {
     return false;
   }
 
-  uint8_t crc = calculate_checksum(packet, 32);
   uint16_t ack_id = (uint16_t)packet[4] | ((uint16_t)packet[5] << 8);
   uint32_t ack_seq = (uint32_t)packet[6] | ((uint32_t)packet[7] << 8) |
-                     ((uint32_t)packet[8] << 16) |
-                     ((uint32_t)packet[9] << 24);
+                     ((uint32_t)packet[8] << 16) | ((uint32_t)packet[9] << 24);
 
-  return crc == packet[31] && ack_id == g_settings.tank_id &&
-         ack_seq == seq_num;
+  return (ack_id == g_settings.tank_id && ack_seq == seq_num);
 }
 
-static tx_wait_result_t service_runtime_window(runtime_state_t *runtime,
-                                               uint32_t wait_ms,
-                                               bool listen_for_ack,
-                                               uint8_t attempt,
-                                               uint32_t seq_num,
-                                               uint8_t sent_level,
-                                               uint8_t *latest_level) {
+static tx_wait_result_t
+service_runtime_window(runtime_state_t *runtime, uint32_t wait_ms,
+                       bool listen_for_ack, uint8_t attempt, uint32_t seq_num,
+                       uint8_t sent_level, uint8_t *latest_level) {
   uint32_t start = millis();
 
-  while ((millis() - start) < wait_ms) {
-    if (listen_for_ack && nrf24_available()) {
+  while (1) {
+    uint32_t now = millis();
+    if ((now - start) >= wait_ms) {
+      break;
+    }
+
+    if (listen_for_ack && radio_available()) {
       uint8_t rx[32];
-      nrf24_read(rx, 32);
+      radio_read(rx, 32);
 
       if (packet_matches_data_ack(rx, seq_num)) {
         DEBUG_PRINT("[ACK] OK try:%d\r\n", attempt);
@@ -403,14 +493,14 @@ static tx_wait_result_t service_runtime_window(runtime_state_t *runtime,
       g_sensor_event_pending = 0;
       *latest_level = sample_filtered_level(runtime);
       if (*latest_level != sent_level) {
-        DEBUG_PRINT("[TX] Lvl update during TX: %d%%\r\n",
-                    *latest_level);
+        DEBUG_PRINT("[TX] Lvl update during TX: %d%%\r\n", *latest_level);
         return TX_WAIT_LEVEL_CHANGED;
       }
     }
 
+    bool button_pressed = is_button_pressed();
     if (g_button_event_pending || runtime->button_press_start != 0 ||
-        GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+        button_pressed) {
       g_button_event_pending = 0;
       button_action_t action = poll_button_action(runtime);
       if (action != BUTTON_ACTION_NONE) {
@@ -443,6 +533,8 @@ static void prepare_data_packet(uint8_t *packet, uint8_t current_level) {
   }
 
   packet[9] = g_probe_fault;
+  packet[10] = g_runtime.link_quality_valid ? g_runtime.link_quality : 0xFF;
+  packet[11] = g_runtime.last_rpd_seen;
   packet[12] = (uint8_t)(g_runtime.seq_num & 0xFF);
   packet[13] = (uint8_t)((g_runtime.seq_num >> 8) & 0xFF);
   packet[14] = (uint8_t)((g_runtime.seq_num >> 16) & 0xFF);
@@ -453,71 +545,77 @@ static void prepare_data_packet(uint8_t *packet, uint8_t current_level) {
 static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
                                              uint8_t *packet,
                                              uint8_t *current_level) {
-  nrf24_init();
-
   for (uint8_t attempt = 0; attempt < DATA_MAX_RETRIES; attempt++) {
-    nrf24_power_up_tx();
-    nrf24_set_tx_addr(PAIRING_ADDR);
+    radio_power_up_tx();
+    radio_set_tx_addr(PAIRING_ADDR);
 
+#if USE_WIRELESS_LORA
+    // LoRa: 1 clean packet per attempt so sensor enters RX before Controller
+    // sends ACK
+    radio_send(packet, 32);
+#else
     for (int burst = 0; burst < 3; burst++) {
-      nrf24_send(packet, 32);
+      radio_send(packet, 32);
 
       tx_wait_result_t gap_result =
-          service_runtime_window(runtime, 10, false, attempt,
-                                 runtime->seq_num, *current_level,
-                                 current_level);
+          service_runtime_window(runtime, 10, false, attempt, runtime->seq_num,
+                                 *current_level, current_level);
       if (gap_result == TX_WAIT_LEVEL_CHANGED) {
-        nrf24_power_down();
+        radio_power_down();
         return TX_SEND_RESTART_LEVEL;
       }
       if (gap_result == TX_WAIT_ABORTED) {
-        nrf24_power_down();
+        radio_power_down();
         return TX_SEND_ABORTED;
       }
     }
+#endif
 
     if (attempt == 0) {
-      DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n",
-                  (unsigned long)runtime->seq_num, attempt);
+      DEBUG_PRINT("[TX] Seq:%lu try:%d\r\n", (unsigned long)runtime->seq_num,
+                  attempt);
     }
 
-    nrf24_flush_rx();
-    nrf24_power_up_rx();
+    radio_flush_rx();
+    radio_power_up_rx();
 
     tx_wait_result_t ack_result =
-        service_runtime_window(runtime, DATA_ACK_WAIT_MS, true,
-                               attempt, runtime->seq_num,
-                               *current_level, current_level);
+        service_runtime_window(runtime, DATA_ACK_WAIT_MS, true, attempt,
+                               runtime->seq_num, *current_level, current_level);
+    bool rpd_seen = radio_take_rpd();
+
     if (ack_result == TX_WAIT_ACK_RECEIVED) {
-      nrf24_power_down();
+      update_link_quality(runtime, attempt, true, rpd_seen);
+      radio_power_down();
       return TX_SEND_ACKED;
     }
     if (ack_result == TX_WAIT_LEVEL_CHANGED) {
-      nrf24_power_down();
+      radio_power_down();
       return TX_SEND_RESTART_LEVEL;
     }
     if (ack_result == TX_WAIT_ABORTED) {
-      nrf24_power_down();
+      radio_power_down();
       return TX_SEND_ABORTED;
     }
 
+    update_link_quality(runtime, attempt, false, rpd_seen);
+
     if (attempt < DATA_MAX_RETRIES - 1) {
-      tx_wait_result_t retry_result =
-          service_runtime_window(runtime, DATA_RETRY_DELAY_MS,
-                                 false, attempt, runtime->seq_num,
-                                 *current_level, current_level);
+      tx_wait_result_t retry_result = service_runtime_window(
+          runtime, DATA_RETRY_DELAY_MS, false, attempt, runtime->seq_num,
+          *current_level, current_level);
       if (retry_result == TX_WAIT_LEVEL_CHANGED) {
-        nrf24_power_down();
+        radio_power_down();
         return TX_SEND_RESTART_LEVEL;
       }
       if (retry_result == TX_WAIT_ABORTED) {
-        nrf24_power_down();
+        radio_power_down();
         return TX_SEND_ABORTED;
       }
     }
   }
 
-  nrf24_power_down();
+  radio_power_down();
   return TX_SEND_NO_ACK;
 }
 
@@ -571,6 +669,13 @@ void gpio_init(void) {
 
   GPIO_SetBits(GPIOD, LED_PIN); // Turn off at start (Active-Low)
 
+  // Sensor Common Power: PD3 (Output Push-pull, initially 0V / OFF)
+  GPIO_InitStructure.GPIO_Pin = SENSOR_POWER_PIN;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+  GPIO_Init(GPIOD, &GPIO_InitStructure);
+  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN); // Keep OFF during sleep
+
   // Sensor Pins: PC0, PC1, PC2, PC4 (Input Pull-up)
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
   GPIO_InitStructure.GPIO_Pin =
@@ -603,14 +708,33 @@ void gpio_init(void) {
  *
  * Benefit: Prevents "jumpy" or incorrect readings and provides a "Service
  * Required" alert if hardware maintenance is needed.
- *
- * @return uint8_t Current water level (0, 25, 50, 75, or 100)
  */
 uint8_t read_internal_probes(uint8_t *fault_out) {
-  uint8_t p25 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0);
-  uint8_t p50 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0);
-  uint8_t p75 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0);
-  uint8_t p100 = (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0);
+  // 1. Power ON the common probe wire (PD3)
+  GPIO_SetBits(GPIOD, SENSOR_POWER_PIN);
+  Delay_Ms(15); // Allow water conductivity & transistor junction to stabilize
+
+  // 2. Take 5 multi-samples over 10ms to filter contact resistance & AC ripple
+  uint8_t c25 = 0, c50 = 0, c75 = 0, c100 = 0;
+  for (int s = 0; s < 5; s++) {
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0) c25++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0) c50++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0) c75++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0) c100++;
+    Delay_Ms(2);
+  }
+
+  // 3. Power OFF probe wire immediately (keeps average power < 0.01mW)
+  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN);
+
+  // Majority vote: if at least 2 out of 5 samples detected LOW (transistor ON), probe is wet
+  uint8_t p25 = (c25 >= 2);
+  uint8_t p50 = (c50 >= 2);
+  uint8_t p75 = (c75 >= 2);
+  uint8_t p100 = (c100 >= 2);
+
+  DEBUG_PRINT("[PROBES] Raw hits (out of 5): [25%%]:%d [50%%]:%d [75%%]:%d [100%%]:%d\r\n",
+              c25, c50, c75, c100);
 
   // --- FAULT DETECTION LOGIC: Bitmask Mode ---
   uint8_t fault_mask = 0;
@@ -658,35 +782,12 @@ uint8_t read_internal_probes(uint8_t *fault_out) {
 }
 
 uint8_t read_tank_level(void) {
-  uint8_t f1, f2, f3;
-  uint8_t r1 = read_internal_probes(&f1);
-  Delay_Ms(2);
-  uint8_t r2 = read_internal_probes(&f2);
-  Delay_Ms(2);
-  uint8_t r3 = read_internal_probes(&f3);
+  uint8_t fault = 0;
+  uint8_t level = read_internal_probes(&fault);
+  g_probe_fault = fault;
 
-  // Combine ALL faults found in any sample
-  g_probe_fault = f1 | f2 | f3;
-
-  // Use median-of-3 instead of max-of-3 to avoid sticky high readings
-  // during fast draining (e.g. 25% -> 0%).
-  uint8_t min = r1;
-  uint8_t max = r1;
-  if (r2 < min)
-    min = r2;
-  if (r2 > max)
-    max = r2;
-  if (r3 < min)
-    min = r3;
-  if (r3 > max)
-    max = r3;
-  uint8_t best = (uint8_t)((uint16_t)r1 + (uint16_t)r2 + (uint16_t)r3 - min -
-                           max);
-
-  if (best > 0 || g_probe_fault > 0)
-    DEBUG_PRINT("[DATA] Level: %d%% | Fault Mask: 0x%02X\r\n", best,
-                g_probe_fault);
-  return best;
+  DEBUG_PRINT("[DATA] Tank Level: %d%%\r\n", level);
+  return level;
 }
 
 /* ========== ADC for Battery Monitoring (PA1) ========== */
@@ -742,7 +843,8 @@ uint8_t read_battery_level(void) {
     accum += get_adc_val(ADC_Channel_Vrefint);
   uint16_t vref_raw = (uint16_t)(accum / 8);
 
-  if (vref_raw == 0) return 0;
+  if (vref_raw == 0)
+    return 0;
 
   accum = 0;
   for (i = 0; i < 8; i++)
@@ -752,12 +854,14 @@ uint8_t read_battery_level(void) {
   uint32_t v_bat_mv = ((uint32_t)bat_raw * BAT_VOLTAGE_SCALE) / vref_raw;
   DEBUG_PRINT("[BAT] %lumV\r\n", (unsigned long)v_bat_mv);
 
-  if (BAT_MAX_MV <= BAT_MIN_MV) return 0;
-  if (v_bat_mv >= BAT_MAX_MV)   return 100;
-  if (v_bat_mv <= BAT_MIN_MV)   return 0;
+  if (BAT_MAX_MV <= BAT_MIN_MV)
+    return 0;
+  if (v_bat_mv >= BAT_MAX_MV)
+    return 100;
+  if (v_bat_mv <= BAT_MIN_MV)
+    return 0;
 
-  return (uint8_t)((v_bat_mv - BAT_MIN_MV) * 100 /
-                   (BAT_MAX_MV - BAT_MIN_MV));
+  return (uint8_t)((v_bat_mv - BAT_MIN_MV) * 100 / (BAT_MAX_MV - BAT_MIN_MV));
 }
 
 /* ========== Auto-Generate Tank ID ========== */
@@ -781,7 +885,7 @@ uint16_t generate_new_tank_id(void) {
 }
 
 /* ========== Protocol Checksum (CRC-8) ========== */
-uint8_t calculate_checksum(uint8_t *data, uint8_t length) {
+uint8_t calculate_checksum(const uint8_t *data, uint8_t length) {
   uint8_t crc = 0x00;
   for (uint8_t i = 0; i < length - 1; i++) {
     crc ^= data[i];
@@ -796,7 +900,7 @@ uint8_t calculate_checksum(uint8_t *data, uint8_t length) {
 }
 
 void run_pairing(void) {
-  nrf24_init();
+  radio_init();
   Delay_Ms(100);
 
   uint16_t new_id = generate_new_tank_id();
@@ -810,11 +914,11 @@ void run_pairing(void) {
   packet[3] = 32;
   packet[4] = (new_id & 0xFF);
   packet[5] = (new_id >> 8);
-  packet[6] = read_tank_level();    // Level at index 6
+  packet[6] = read_tank_level(); // Level at index 6
   DEBUG_PRINT("[PAIR] Lvl:%d Reading bat...\r\n", packet[6]);
   packet[7] = read_battery_level(); // Battery at index 7
   DEBUG_PRINT("[PAIR] Bat:%d\r\n", packet[7]);
-  packet[8] = 0x10;                 // Version at index 8
+  packet[8] = 0x10; // Version at index 8
   packet[31] = calculate_checksum(packet, 32);
 
   DEBUG_PRINT("[PAIR] Pkt: ");
@@ -822,8 +926,7 @@ void run_pairing(void) {
     DEBUG_PRINT("%02X ", packet[k]);
   DEBUG_PRINT("CRC:%02X\r\n", packet[31]);
 
-  DEBUG_PRINT("[PAIR] Bcast %dmin bursts:%d ack:%dms\r\n",
-              PAIRING_TIME_MINS,
+  DEBUG_PRINT("[PAIR] Bcast %dmin bursts:%d ack:%dms\r\n", PAIRING_TIME_MINS,
               PAIRING_BURST_COUNT, PAIRING_ACK_WAIT_MS);
 
   bool paired = false;
@@ -833,7 +936,8 @@ void run_pairing(void) {
   for (int i = 0; i < PAIRING_BURST_COUNT && !paired; i++) {
     // Check for 1 minute timeout explicitly
     if ((millis() - pairing_start_time) > (PAIRING_TIME_MINS * 60000)) {
-      DEBUG_PRINT("[PAIR] Timeout reached after %d mins\r\n", PAIRING_TIME_MINS);
+      DEBUG_PRINT("[PAIR] Timeout reached after %d mins\r\n",
+                  PAIRING_TIME_MINS);
       break;
     }
 
@@ -843,52 +947,44 @@ void run_pairing(void) {
     else
       GPIO_SetBits(GPIOD, LED_PIN);
 
-
     // 1. Send pairing request
-    nrf24_power_up_tx();
-    nrf24_set_tx_addr(PAIRING_ADDR);
-    nrf24_send(packet, 32);
+    radio_power_up_tx();
+    radio_set_tx_addr(PAIRING_ADDR);
+    radio_send(packet, 32);
 
     // 2. Flush RX FIFO + switch to RX to listen for controller ACK
-    nrf24_flush_rx();
-    nrf24_power_up_rx();
+    radio_flush_rx();
+    radio_power_up_rx();
 
     // 3. Wait for ACK from controller
     uint32_t start = millis();
     while ((millis() - start) < PAIRING_ACK_WAIT_MS) {
-      if (nrf24_available()) {
+      if (radio_available()) {
         uint8_t rx_buf[32];
-        nrf24_read(rx_buf, 32);
+        radio_read(rx_buf, 32);
 
-        DEBUG_PRINT("[PAIR] RX: S=%02X%02X T=%02X\r\n", rx_buf[0],
-                    rx_buf[1], rx_buf[2]);
+        DEBUG_PRINT("[PAIR] RX: S=%02X%02X T=%02X\r\n", rx_buf[0], rx_buf[1],
+                    rx_buf[2]);
 
         // Check normal sync: 0xAA 0x55 + type 0x07 (PAIRING_RESP)
         if (rx_buf[0] == 0xAA && rx_buf[1] == 0x55 &&
             rx_buf[2] == PKT_TYPE_PAIRING_RESP) {
-          uint8_t calc_crc = calculate_checksum(rx_buf, 32);
-          uint16_t resp_id =
-              (uint16_t)rx_buf[4] | ((uint16_t)rx_buf[5] << 8);
+          uint16_t resp_id = (uint16_t)rx_buf[4] | ((uint16_t)rx_buf[5] << 8);
+          ack_status = rx_buf[11];
 
-          DEBUG_PRINT("[PAIR] NSync RID:0x%04X MY:0x%04X "
-                      "CC:%02X PC:%02X\r\n",
-                      resp_id, new_id, calc_crc, rx_buf[31]);
+          DEBUG_PRINT("[PAIR] NSync RID:0x%04X MY:0x%04X Status=%d Slot=%d\r\n",
+                      resp_id, new_id, ack_status, rx_buf[6]);
 
-          if (calc_crc == rx_buf[31] && resp_id == new_id) {
-            ack_status = rx_buf[11]; // Status at offset 11
-            DEBUG_PRINT("[PAIR] ACK st:%d\r\n", ack_status);
-
-            if (ack_status == PAIRING_ACK_STATUS_PAIRED) {
-              // NOW save - controller confirmed pairing is done
-              g_settings.tank_id = new_id;
-              g_settings.pairing_status = 1;
-              flash_save_settings();
-              paired = true;
-              DEBUG_PRINT("[PAIR] OK! ID:0x%04X\r\n", new_id);
-            }
+          if (resp_id == new_id &&
+              (ack_status == PAIRING_ACK_STATUS_PAIRED || ack_status == 1)) {
+            g_settings.tank_id = new_id;
+            g_settings.pairing_status = 1;
+            flash_save_settings();
+            paired = true;
+            DEBUG_PRINT("[PAIR] 🎉 MATCHED! Paired with Slot %d, Stopping "
+                        "Pairing Loop.\r\n",
+                        rx_buf[6]);
             break;
-          } else {
-            DEBUG_PRINT("[PAIR] CRC/ID mismatch\r\n");
           }
         }
 
@@ -900,30 +996,23 @@ void run_pairing(void) {
 
           if (inv[0] == 0xAA && inv[1] == 0x55 &&
               inv[2] == PKT_TYPE_PAIRING_RESP) {
-            uint8_t calc_crc = calculate_checksum(inv, 32);
-            uint16_t resp_id =
-                (uint16_t)inv[4] | ((uint16_t)inv[5] << 8);
+            uint16_t resp_id = (uint16_t)inv[4] | ((uint16_t)inv[5] << 8);
+            ack_status = inv[11];
 
-            DEBUG_PRINT("[PAIR] InvSync RID:0x%04X MY:0x%04X "
-                        "CC:%02X PC:%02X\r\n",
-                        resp_id, new_id, calc_crc, inv[31]);
+            DEBUG_PRINT(
+                "[PAIR] InvSync RID:0x%04X MY:0x%04X Status=%d Slot=%d\r\n",
+                resp_id, new_id, ack_status, inv[6]);
 
-            if (calc_crc == inv[31] && resp_id == new_id) {
-              ack_status = inv[11];
-              DEBUG_PRINT("[PAIR] ACK(Inv) st:%d\r\n",
-                          ack_status);
-
-              if (ack_status == PAIRING_ACK_STATUS_PAIRED) {
-                g_settings.tank_id = new_id;
-                g_settings.pairing_status = 1;
-                flash_save_settings();
-                paired = true;
-                DEBUG_PRINT("[PAIR] OK(Inv)! ID:0x%04X\r\n",
-                            new_id);
-              }
+            if (resp_id == new_id &&
+                (ack_status == PAIRING_ACK_STATUS_PAIRED || ack_status == 1)) {
+              g_settings.tank_id = new_id;
+              g_settings.pairing_status = 1;
+              flash_save_settings();
+              paired = true;
+              DEBUG_PRINT("[PAIR] 🎉 MATCHED(Inv)! Paired with Slot %d, "
+                          "Stopping Pairing Loop.\r\n",
+                          inv[6]);
               break;
-            } else {
-              DEBUG_PRINT("[PAIR] Inv CRC/ID mismatch\r\n");
             }
           }
         }
@@ -933,7 +1022,7 @@ void run_pairing(void) {
   }
 
   GPIO_SetBits(GPIOD, LED_PIN); // LED OFF
-  nrf24_power_down();
+  radio_power_down();
 
   if (paired) {
     // Success feedback: Fast 5x blink
@@ -957,8 +1046,7 @@ void run_pairing(void) {
       GPIO_SetBits(GPIOD, LED_PIN);
       Delay_Ms(500);
     }
-    DEBUG_PRINT("[PAIR] FAIL after %d tries\r\n",
-                PAIRING_BURST_COUNT);
+    DEBUG_PRINT("[PAIR] FAIL after %d tries\r\n", PAIRING_BURST_COUNT);
   }
 }
 
@@ -969,8 +1057,7 @@ int main(void) {
   USART_Printf_Init(115200);
 
   DEBUG_PRINT("\r\n=== TANK BOOT ===\r\n");
-  DEBUG_PRINT("CH32V003 @ %luHz\r\n",
-              (unsigned long)SystemCoreClock);
+  DEBUG_PRINT("CH32V003 @ %luHz\r\n", (unsigned long)SystemCoreClock);
 
   timer_init();
   gpio_init();
@@ -979,27 +1066,24 @@ int main(void) {
 
   // SAFETY: Delay at boot to allow WCH-Link to connect before MCU sleeps.
   // This is the most reliable way to prevent "Lockout" during development.
-  DEBUG_PRINT("[SYS] SafeDelay %dms.. ",
-              BOOT_SAFETY_DELAY_MS);
+  DEBUG_PRINT("[SYS] SafeDelay %dms.. ", BOOT_SAFETY_DELAY_MS);
   Delay_Ms(BOOT_SAFETY_DELAY_MS);
   DEBUG_PRINT("OK\r\n");
 
   __enable_irq();
 
   DEBUG_PRINT("Init Radio...\r\n");
-  nrf24_init();
-  nrf24_power_down(); // Start in low power mode
+  radio_init();
+  radio_power_down(); // Start in low power mode
 
   // Load settings from Flash
   flash_read_settings();
 
   if (g_settings.pairing_status == 1) {
-    DEBUG_PRINT("[SYS] Paired ID:0x%04X\r\n",
-                g_settings.tank_id);
-    nrf24_set_tx_addr(PAIRING_ADDR); // Ensure address is set
+    DEBUG_PRINT("[SYS] Paired ID:0x%04X\r\n", g_settings.tank_id);
+    radio_set_tx_addr(PAIRING_ADDR); // Ensure address is set
   } else {
-    DEBUG_PRINT(
-        "[SYS] NOT PAIRED. Hold button to pair\r\n");
+    DEBUG_PRINT("[SYS] NOT PAIRED. Hold button to pair\r\n");
   }
 
   // Boot UI: Triple blink (500ms ON, 500ms OFF)
@@ -1017,8 +1101,9 @@ int main(void) {
 
   while (1) {
     // 1. Button Handling
+    bool button_pressed = is_button_pressed();
     if (g_button_event_pending || g_runtime.button_press_start != 0 ||
-        GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+        button_pressed) {
       g_button_event_pending = 0;
 
       button_action_t button_action = poll_button_action(&g_runtime);
@@ -1027,7 +1112,7 @@ int main(void) {
         continue;
       }
 
-      if (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0) {
+      if (button_pressed) {
         Delay_Ms(10);
         continue;
       }
@@ -1037,22 +1122,19 @@ int main(void) {
     if (g_settings.pairing_status == 1) {
       uint8_t current_level = sample_filtered_level(&g_runtime);
       bool level_changed = (current_level != g_runtime.last_sent_level);
-      bool heartbeat_due =
-          (g_runtime.sleep_cycle_count >= HEARTBEAT_CYCLES);
+      bool heartbeat_due = (g_runtime.sleep_cycle_count >= HEARTBEAT_CYCLES);
 
       // --- Battery Internal Logic ---
       if (g_runtime.last_sent_level == 0xFF || heartbeat_due) {
         g_runtime.current_battery = read_battery_level();
-        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n",
-                    g_runtime.current_battery);
+        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n", g_runtime.current_battery);
         Delay_Ms(100); // stabilize battery reading
       }
 
       // Send if: First time OR Level changed OR 4 hours heartbeat
       // But respect cooldown after failed ACK (wait ~1 min)
       bool need_send =
-          (g_runtime.last_sent_level == 0xFF || level_changed ||
-           heartbeat_due);
+          (g_runtime.last_sent_level == 0xFF || level_changed || heartbeat_due);
 
       if (level_changed) {
         // New data! Reset cooldown immediately
@@ -1061,8 +1143,7 @@ int main(void) {
         g_runtime.retry_cooldown--;
         if (g_runtime.retry_cooldown > 0) {
           need_send = false; // Still cooling down, skip this wake
-          DEBUG_PRINT("[TX] Cooldown %d\r\n",
-                      g_runtime.retry_cooldown);
+          DEBUG_PRINT("[TX] Cooldown %d\r\n", g_runtime.retry_cooldown);
         }
       }
 
@@ -1074,19 +1155,18 @@ int main(void) {
         bool show_tx_feedback = false;
 
         while (1) {
-          level_changed =
-              (current_level != g_runtime.last_sent_level);
+          level_changed = (current_level != g_runtime.last_sent_level);
           if (!(g_runtime.last_sent_level == 0xFF || level_changed ||
                 heartbeat_due)) {
             break;
           }
 
           prepare_data_packet(packet, current_level);
-          DEBUG_PRINT("[TX] %s Seq:%lu L:%d%% B:%d%% F:%d\r\n",
+          DEBUG_PRINT("[TX] %s Seq:%lu L:%d%% B:%d%% Q:%u%% R:%u F:%d\r\n",
                       level_changed ? "CHG" : "HB",
-                      (unsigned long)g_runtime.seq_num,
-                      current_level, g_runtime.current_battery,
-                      g_probe_fault);
+                      (unsigned long)g_runtime.seq_num, current_level,
+                      g_runtime.current_battery, g_runtime.link_quality,
+                      g_runtime.last_rpd_seen, g_probe_fault);
 
           send_attempted = true;
           tx_send_result_t tx_result =
@@ -1106,8 +1186,7 @@ int main(void) {
           ack_received = (tx_result == TX_SEND_ACKED);
           show_tx_feedback = true;
           if (!ack_received) {
-            DEBUG_PRINT("[TX] NO ACK after %d tries\r\n",
-                        DATA_MAX_RETRIES);
+            DEBUG_PRINT("[TX] NO ACK after %d tries\r\n", DATA_MAX_RETRIES);
             g_runtime.retry_cooldown = 4;
           } else {
             g_runtime.last_sent_level = current_level;
@@ -1133,15 +1212,12 @@ int main(void) {
         }
       }
     } else {
-      DEBUG_PRINT("[SYS] Not paired\r\n");
-      Delay_Ms(100);
+      DEBUG_PRINT("[SYS] Not paired. Hold button to pair.\r\n");
     }
 
-    // 3. Enter Deep Sleep
-    if (g_settings.pairing_status == 1) {
-      DEBUG_PRINT("[SYS] Sleep\r\n");
-      DEBUG_PRINT("----------\r\n");
-    }
+    // 3. Enter Deep Sleep (Saves battery in both paired and un-paired mode)
+    DEBUG_PRINT("[SYS] Sleep\r\n");
+    DEBUG_PRINT("----------\r\n");
     enter_deep_sleep();
     g_runtime.sleep_cycle_count++; // Increment cycles on each AWU wake
   }

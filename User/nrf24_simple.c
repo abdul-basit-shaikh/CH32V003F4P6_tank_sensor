@@ -12,10 +12,17 @@
 #define REG_RF_CH 0x05
 #define REG_RF_SETUP 0x06
 #define REG_STATUS 0x07
+#define REG_RPD 0x09
 #define REG_RX_ADDR_P0 0x0A
 #define REG_TX_ADDR 0x10
 #define REG_RX_PW_P0 0x11
 #define REG_FIFO_STATUS 0x17
+
+#define STATUS_RX_DR 0x40
+#define STATUS_TX_DS 0x20
+#define STATUS_MAX_RT 0x10
+#define STATUS_ALL_IRQ (STATUS_RX_DR | STATUS_TX_DS | STATUS_MAX_RT)
+#define FIFO_RX_EMPTY 0x01
 
 // Commands
 #define CMD_R_REG 0x00
@@ -25,6 +32,8 @@
 #define CMD_FLUSH_TX 0xE1
 #define CMD_FLUSH_RX 0xE2
 #define CMD_NOP 0xFF
+
+static uint8_t g_rpd_latched = 0;
 
 static void spi_init(void) {
   GPIO_InitTypeDef GPIO_InitStructure = {0};
@@ -113,6 +122,46 @@ static void nrf_write_buf(uint8_t reg, const uint8_t *buf, uint8_t len) {
   GPIO_SetBits(GPIOC, NRF_CSN_PIN);
 }
 
+static void nrf_strobe(uint8_t cmd) {
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(cmd);
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+}
+
+static void nrf_write_payload(const uint8_t *data, uint8_t len) {
+  uint8_t payload_len = (len > 32) ? 32 : len;
+  uint8_t i = 0;
+
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_W_TX_PL);
+
+  for (; i < payload_len; i++) {
+    spi_xfer(data[i]);
+  }
+  for (; i < 32; i++) {
+    spi_xfer(0);
+  }
+
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+}
+
+static void nrf_read_payload(uint8_t *data, uint8_t len) {
+  uint8_t read_len = (len > 32) ? 32 : len;
+  uint8_t i = 0;
+
+  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
+  spi_xfer(CMD_R_RX_PL);
+
+  for (; i < read_len; i++) {
+    data[i] = spi_xfer(CMD_NOP);
+  }
+  for (; i < 32; i++) {
+    (void)spi_xfer(CMD_NOP);
+  }
+
+  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+}
+
 void nrf24_init(void) {
   spi_init();
   DEBUG_PRINT("[NRF] Init: 250k 0dBm 2BCRC NO-ACK\r\n");
@@ -133,21 +182,17 @@ void nrf24_init(void) {
   nrf_write_reg(REG_RX_PW_P0, 32);     // Payload 32B
 
   // Flag cleaning
-  nrf_write_reg(0x07, 0x70); // Clear all flags
-
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_TX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_RX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  nrf_write_reg(REG_STATUS, STATUS_ALL_IRQ); // Clear all flags
+  nrf_strobe(CMD_FLUSH_TX);
+  nrf_strobe(CMD_FLUSH_RX);
 
   // Verify registers after init
+#if DEBUG_ENABLE
   uint8_t cfg = nrf_read_reg(REG_CONFIG);
   uint8_t ch = nrf_read_reg(REG_RF_CH);
   uint8_t rf = nrf_read_reg(REG_RF_SETUP);
   DEBUG_PRINT("[NRF] CFG=%02X CH=%d RF=%02X\r\n",cfg, ch, rf);
+#endif
 }
 
 void nrf24_set_tx_addr(const uint8_t *addr) {
@@ -185,13 +230,10 @@ void nrf24_power_up_rx(void) {
   nrf_write_reg(REG_RX_PW_P0, 32);
 
   // Clear flags + flush FIFOs
-  nrf_write_reg(REG_STATUS, 0x70);
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_TX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_RX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  nrf_write_reg(REG_STATUS, STATUS_ALL_IRQ);
+  nrf_strobe(CMD_FLUSH_TX);
+  nrf_strobe(CMD_FLUSH_RX);
+  g_rpd_latched = 0;
 
   // Power up in RX mode
   nrf_write_reg(REG_CONFIG, 0x0F);    // PWR_UP + PRIM_RX + CRC 2B
@@ -200,22 +242,16 @@ void nrf24_power_up_rx(void) {
   Delay_Ms(1);
 }
 
-bool nrf24_send(uint8_t *data, uint8_t len) {
+bool nrf24_send(const uint8_t *data, uint8_t len) {
   // 1. CE LOW (critical for clean TX trigger)
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
 
   // 2. Clear flags and flush TX FIFO
-  nrf_write_reg(0x07, 0x70);
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_TX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  nrf_write_reg(REG_STATUS, STATUS_ALL_IRQ);
+  nrf_strobe(CMD_FLUSH_TX);
 
   // 3. Write Payload
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_W_TX_PL);
-  for (uint8_t i = 0; i < 32; i++)
-    spi_xfer(i < len ? data[i] : 0);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  nrf_write_payload(data, len);
 
   // 4. CE pulse (LOW->HIGH edge triggers TX)
   GPIO_SetBits(GPIOD, NRF_CE_PIN);
@@ -224,31 +260,34 @@ bool nrf24_send(uint8_t *data, uint8_t len) {
 
   // 5. Wait for TX complete, clear flags
   Delay_Ms(2);
-  nrf_write_reg(0x07, 0x30);
+  nrf_write_reg(REG_STATUS, STATUS_TX_DS | STATUS_MAX_RT);
 
   return true;
 }
 
 bool nrf24_available(void) {
-  uint8_t status = nrf_read_reg(0x07);
-  if (status & 0x40) {
+  if (nrf_read_reg(REG_RPD) & 0x01) {
+    g_rpd_latched = 1;
+  }
+
+  uint8_t status = nrf_read_reg(REG_STATUS);
+  if (status & STATUS_RX_DR) {
     DEBUG_PRINT("[NRF] RX_DR! S:0x%02X\r\n",
                status);
     return true;
   }
+
+  // Clone fallback: sometimes RX_DR doesn't assert, but FIFO still has data.
+  if ((nrf_read_reg(REG_FIFO_STATUS) & FIFO_RX_EMPTY) == 0) {
+    return true;
+  }
+
   return false;
 }
 
 void nrf24_read(uint8_t *data, uint8_t len) {
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_R_RX_PL);
-  for (uint8_t i = 0; i < 32; i++) {
-    uint8_t b = spi_xfer(CMD_NOP);
-    if (i < len)
-      data[i] = b;
-  }
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-  nrf_write_reg(0x07, 0x40); // Clear RX_DR
+  nrf_read_payload(data, len);
+  nrf_write_reg(REG_STATUS, STATUS_RX_DR); // Clear RX_DR
 
   // Hex dump of received packet
   DEBUG_PRINT("[NRF] RX: ");
@@ -259,19 +298,21 @@ void nrf24_read(uint8_t *data, uint8_t len) {
 
 void nrf24_flush_rx(void) {
   GPIO_ResetBits(GPIOD, NRF_CE_PIN); // CE low during flush
-  nrf_write_reg(0x07, 0x70);         // Clear all status flags
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_RX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
-  GPIO_ResetBits(GPIOC, NRF_CSN_PIN);
-  spi_xfer(CMD_FLUSH_TX);
-  GPIO_SetBits(GPIOC, NRF_CSN_PIN);
+  nrf_write_reg(REG_STATUS, STATUS_ALL_IRQ); // Clear all status flags
+  nrf_strobe(CMD_FLUSH_RX);
+  nrf_strobe(CMD_FLUSH_TX);
 }
 
 void nrf24_power_down(void) {
   DEBUG_PRINT("[NRF] PwrDn\r\n");
   GPIO_ResetBits(GPIOD, NRF_CE_PIN);
   nrf_write_reg(REG_CONFIG, 0x08);
+}
+
+bool nrf24_take_rpd_latched(void) {
+  bool seen = (g_rpd_latched != 0);
+  g_rpd_latched = 0;
+  return seen;
 }
 
 uint8_t nrf24_get_status(void) { return nrf_read_reg(0x07); }

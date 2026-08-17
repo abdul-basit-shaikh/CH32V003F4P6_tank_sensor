@@ -5,16 +5,19 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../User/lora_sx1278.c \
 ../User/main.c \
 ../User/nrf24_simple.c \
 ../User/system_ch32v00x.c 
 
 C_DEPS += \
+./User/lora_sx1278.d \
 ./User/main.d \
 ./User/nrf24_simple.d \
 ./User/system_ch32v00x.d 
 
 OBJS += \
+./User/lora_sx1278.o \
 ./User/main.o \
 ./User/nrf24_simple.o \
 ./User/system_ch32v00x.o 

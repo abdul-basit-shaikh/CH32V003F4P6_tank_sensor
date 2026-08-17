@@ -1,4 +1,4 @@
-User/main.o: ../User/main.c \
+User/lora_sx1278.o: ../User/lora_sx1278.c ../User/lora_sx1278.h \
  c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Peripheral/inc/ch32v00x.h \
  c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Core/core_riscv.h \
  c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/User/system_ch32v00x.h \
@@ -21,8 +21,9 @@ User/main.o: ../User/main.c \
  c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Peripheral/inc/ch32v00x_usart.h \
  c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Peripheral/inc/ch32v00x_wwdg.h \
  ../User/config.h \
- c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Debug/debug.h \
- ../User/lora_sx1278.h
+ c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Debug/debug.h
+
+../User/lora_sx1278.h:
 
 c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Peripheral/inc/ch32v00x.h:
 
@@ -69,5 +70,3 @@ c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Peripheral/inc
 ../User/config.h:
 
 c:/Users/shaik/mounriver-studio-projects/CH32V003F4P6_tank_sensor/Debug/debug.h:
-
-../User/lora_sx1278.h:

@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Tank_Sensor")(type "KiCad")(uri "${KIPRJDIR}/Tank_Sensor.pretty")(options "")(descr "Custom footprints for Tank Sensor project"))
+)
