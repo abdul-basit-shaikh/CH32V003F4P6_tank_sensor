@@ -66,6 +66,7 @@ typedef struct {
   uint8_t candidate_count;
   bool first_reading_done;
   uint8_t current_battery;
+  bool battery_initialized;
   uint8_t retry_cooldown;
   uint8_t link_quality;
   uint8_t last_rpd_seen;
@@ -280,6 +281,7 @@ static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->candidate_count = 0;
   runtime->first_reading_done = false;
   runtime->current_battery = 0;
+  runtime->battery_initialized = false;
   runtime->retry_cooldown = 0;
   runtime->link_quality = 0;
   runtime->last_rpd_seen = 0;
@@ -795,14 +797,18 @@ uint8_t read_tank_level(void) {
 /* ========== ADC for Battery Monitoring (PA1) ========== */
 void adc_init(void) {
   ADC_InitTypeDef ADC_InitStructure = {0};
-  GPIO_InitTypeDef GPIO_InitStructure = {0};
 
-  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1, ENABLE);
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
   RCC_ADCCLKConfig(RCC_PCLK2_Div8);
 
+#if (!USE_INTERNAL_VREF_BATTERY)
+  // PA1 Analog In only needed if using external resistor divider
+  GPIO_InitTypeDef GPIO_InitStructure = {0};
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
   GPIO_InitStructure.GPIO_Pin = BATTERY_ADC_PIN;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
   GPIO_Init(GPIOA, &GPIO_InitStructure);
+#endif
 
   ADC_DeInit(ADC1);
   ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;
@@ -837,33 +843,99 @@ uint16_t get_adc_val(uint8_t ch) {
   return ADC_GetConversionValue(ADC1);
 }
 
+static uint8_t voltage_to_battery_percent(uint32_t v_bat_mv) {
+  if (v_bat_mv >= 3100)
+    return 100;
+  if (v_bat_mv >= 3000) {
+    // 3000..3100 mV -> 85%..100%
+    return (uint8_t)(85 + ((v_bat_mv - 3000) * 15) / 100);
+  }
+  if (v_bat_mv >= 2900) {
+    // 2900..3000 mV -> 65%..85%
+    return (uint8_t)(65 + ((v_bat_mv - 2900) * 20) / 100);
+  }
+  if (v_bat_mv >= 2800) {
+    // 2800..2900 mV -> 40%..65%
+    return (uint8_t)(40 + ((v_bat_mv - 2800) * 25) / 100);
+  }
+  if (v_bat_mv >= 2750) {
+    // 2750..2800 mV -> 20%..40%
+    return (uint8_t)(20 + ((v_bat_mv - 2750) * 20) / 50);
+  }
+  if (v_bat_mv >= 2700) {
+    // 2700..2750 mV -> 5%..20%
+    return (uint8_t)(5 + ((v_bat_mv - 2700) * 15) / 50);
+  }
+  if (v_bat_mv >= 2650) {
+    // 2650..2700 mV -> 0%..5%
+    return (uint8_t)(((v_bat_mv - 2650) * 5) / 50);
+  }
+  return 0;
+}
+
 uint8_t read_battery_level(void) {
   uint32_t accum = 0;
   uint8_t i;
 
+  // 1. Measure Internal 1.20V Bandgap Reference (Channel 8)
   for (i = 0; i < 8; i++)
     accum += get_adc_val(ADC_Channel_Vrefint);
   uint16_t vref_raw = (uint16_t)(accum / 8);
 
   if (vref_raw == 0)
-    return 0;
+    return g_runtime.current_battery;
 
+  uint32_t v_bat_mv;
+
+#if USE_INTERNAL_VREF_BATTERY
+  // Direct Internal Bandgap Calculation: Zero External Resistors & 0uA Leakage Current!
+  // Formula: Vbat = (Vrefint_mV * 1023) / vref_raw
+  v_bat_mv = (1200UL * 1023UL) / (uint32_t)vref_raw;
+#else
+  // Legacy External Resistor Divider mode via PA1 (100k + 100k)
   accum = 0;
   for (i = 0; i < 8; i++)
     accum += get_adc_val(BATTERY_ADC_CHANNEL);
   uint16_t bat_raw = (uint16_t)(accum / 8);
 
-  uint32_t v_bat_mv = ((uint32_t)bat_raw * BAT_VOLTAGE_SCALE) / vref_raw;
-  DEBUG_PRINT("[BAT] %lumV\r\n", (unsigned long)v_bat_mv);
+  v_bat_mv = ((uint32_t)bat_raw * BAT_VOLTAGE_SCALE) / vref_raw;
+#endif
 
-  if (BAT_MAX_MV <= BAT_MIN_MV)
-    return 0;
-  if (v_bat_mv >= BAT_MAX_MV)
-    return 100;
-  if (v_bat_mv <= BAT_MIN_MV)
-    return 0;
+  uint8_t raw_percent = voltage_to_battery_percent(v_bat_mv);
+  DEBUG_PRINT("[BAT] %lumV (%s, Raw:%d%%)\r\n", (unsigned long)v_bat_mv,
+              USE_INTERNAL_VREF_BATTERY ? "InternalVref" : "Divider",
+              raw_percent);
 
-  return (uint8_t)((v_bat_mv - BAT_MIN_MV) * 100 / (BAT_MAX_MV - BAT_MIN_MV));
+  // 1. First Reading after Boot / Power-On Reset -> direct accept
+  if (!g_runtime.battery_initialized || g_runtime.current_battery == 0) {
+    g_runtime.current_battery = raw_percent;
+    g_runtime.battery_initialized = true;
+    DEBUG_PRINT("[BAT] Init: %d%%\r\n", g_runtime.current_battery);
+    return g_runtime.current_battery;
+  }
+
+  // 2. Sudden High Jump Rule (> +20% jump indicates fresh battery inserted)
+  if (raw_percent > (g_runtime.current_battery + 20)) {
+    g_runtime.current_battery = raw_percent;
+    DEBUG_PRINT("[BAT] New Battery Replaced! High Jump: %d%%\r\n",
+                g_runtime.current_battery);
+    return g_runtime.current_battery;
+  }
+
+  // 3. IIR Smoothing Filter (75% Old + 25% New) for temperature & noise stability
+  uint8_t filtered = (uint8_t)((((uint16_t)g_runtime.current_battery * 3U) +
+                                raw_percent + 2U) /
+                               4U);
+
+  // 4. Monotonic Rule: Disallow upward drift due to sun heating unless confirmed
+  if (filtered > g_runtime.current_battery &&
+      (filtered - g_runtime.current_battery) <= 5) {
+    filtered = g_runtime.current_battery;
+  }
+
+  g_runtime.current_battery = filtered;
+  DEBUG_PRINT("[BAT] Filtered: %d%%\r\n", g_runtime.current_battery);
+  return g_runtime.current_battery;
 }
 
 /* ========== Auto-Generate Tank ID ========== */

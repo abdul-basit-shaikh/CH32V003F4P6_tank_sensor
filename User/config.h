@@ -61,22 +61,27 @@
 #define BATTERY_LOW_THRESHOLD   25 // Warn at ~2.85V for the 2.7V-3.3V range
 #define SENSOR_ERROR_VAL        0xFE
 
-// Battery Monitoring
+// =============================================================
+// BATTERY MONITORING CONFIGURATION
+// =============================================================
+// 1 = Use CH32V003 Internal 1.20V Bandgap (Zero-Drain 0uA, No Resistors Needed on PCB) [RECOMMENDED]
+// 0 = Use External Resistor Divider on PA1 (100k + 100k)
+#define USE_INTERNAL_VREF_BATTERY   1
+
 #define BATTERY_ADC_PIN         GPIO_Pin_1 // PA1
 #define BATTERY_ADC_CHANNEL     ADC_Channel_1
 
-// --- Battery Calibration Macros (Change these after PCB design) ---
+// --- Battery Calibration Macros for External Resistor Divider Mode (When USE_INTERNAL_VREF_BATTERY = 0) ---
 /*
- * Connection Diagram:
+ * Connection Diagram (Legacy Mode):
  * [Battery +] --- [BAT_RESISTOR_UP] ---+--- PA1 (ADC Pin)
  *                                      |
  *                              [BAT_RESISTOR_DOWN]
  *                                      |
  *                                    [GND]
  */
-
-#define BAT_RESISTOR_UP         100000UL // = 100,000 ohm = 100kΩ R1 (from Battery to PA1) in kOhm
-#define BAT_RESISTOR_DOWN       100000UL // = 100,000 ohm = 100kΩ R2 (from PA1 to GND) in kOhm
+#define BAT_RESISTOR_UP         100000UL // = 100,000 ohm = 100kΩ R1 (from Battery to PA1)
+#define BAT_RESISTOR_DOWN       100000UL // = 100,000 ohm = 100kΩ R2 (from PA1 to GND)
 #define BAT_VOLTAGE_SCALE       ((1200UL * (BAT_RESISTOR_UP + BAT_RESISTOR_DOWN)) / BAT_RESISTOR_DOWN)
 
 #define BAT_MIN_MV              2700UL // 0% battery voltage in millivolts

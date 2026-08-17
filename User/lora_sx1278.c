@@ -208,10 +208,11 @@ uint8_t lora_init(void) {
     // Private Sync Word
     lora_write_reg(REG_SYNC_WORD, 0x12);
 
-    // TX Power +17dBm PA_BOOST (Clean output, avoids 140mA battery voltage drop & receiver saturation)
-    lora_write_reg(REG_PA_CONFIG, 0x8F);
-    lora_write_reg(0x4D, 0x84); // Default clean PA_DAC (prevents brownout & distortion)
-    lora_write_reg(REG_OCP, 0x2B); // 100mA safe OCP limit
+    // TX Power +17dBm PA_BOOST with Soft-Start Ramp
+    lora_write_reg(REG_PA_RAMP, 0x08);   // 100us Soft-Start PA Ramp-up (prevents sudden inrush current spikes)
+    lora_write_reg(REG_PA_CONFIG, 0x8F); // +17dBm Maximum Range Output
+    lora_write_reg(0x4D, 0x84);          // Clean PA_DAC
+    lora_write_reg(REG_OCP, 0x2B);       // 100mA safe OCP limit
 
     // Step 4: Now switch to Standby (0x89)
     lora_write_reg(REG_OP_MODE, MODE_LORA_BASE | MODE_STDBY);
@@ -220,7 +221,7 @@ uint8_t lora_init(void) {
     uint8_t opmode = lora_read_reg(REG_OP_MODE);
     DEBUG_PRINT("[LORA] OpMode after init: 0x%02X (Expected 0x89)\r\n", opmode);
 
-    DEBUG_PRINT("[LORA] ? Init Complete: 433MHz | SF7 | BW 125kHz | Power +17dBm\r\n");
+    DEBUG_PRINT("[LORA] ? Init Complete: 433MHz | SF7 | BW 125kHz | Power +17dBm (Soft-Start 100us)\r\n");
     DEBUG_PRINT("========================================\r\n");
     return 0;
 }
@@ -228,9 +229,9 @@ uint8_t lora_init(void) {
 uint8_t lora_send(const uint8_t *buf, size_t size) {
     if (size > 256) size = 256;
 
-    // 1. Enter Standby (0x89)
+    // 1. Enter Standby (0x89) & allow 100uF capacitor to fully charge
     lora_write_reg(REG_OP_MODE, MODE_LORA_BASE | MODE_STDBY);
-    Delay_Ms(5);
+    Delay_Ms(10);
 
     // 2. Load FIFO
     lora_write_reg(REG_FIFO_ADDR_PTR, 0x00);
