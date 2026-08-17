@@ -195,19 +195,23 @@ uint8_t lora_init(void) {
     lora_write_reg(REG_LNA, 0x23);            // Max LNA gain
     lora_write_reg(REG_MODEM_CONFIG_3, 0x04); // Auto AGC On
 
-    // BW 125kHz (0x70) | CR 4/5 (0x02) => 0x72
-    lora_write_reg(REG_MODEM_CONFIG_1, 0x72);
+    // BW 125kHz (0x70) | CR 4/7 (0x06) => 0x76 (Forward Error Correction enabled)
+    lora_write_reg(REG_MODEM_CONFIG_1, 0x76);
 
     // SF7 (0x70) | CRC ON (0x04) => 0x74
     lora_write_reg(REG_MODEM_CONFIG_2, 0x74);
 
+    // Detection optimize & threshold for SF7
+    lora_write_reg(0x31, 0x03);
+    lora_write_reg(0x37, 0x0A);
+
     // Private Sync Word
     lora_write_reg(REG_SYNC_WORD, 0x12);
 
-    // TX Power +20dBm Maximum Output (PA_BOOST = 0xFF, High Power DAC = 0x87)
-    lora_write_reg(REG_PA_CONFIG, 0xFF);
-    lora_write_reg(0x4D, 0x87); // Enable +20dBm PA_DAC boost
-    lora_write_reg(REG_OCP, 0x3B); // 140mA OCP for high power
+    // TX Power +17dBm PA_BOOST (Clean output, avoids 140mA battery voltage drop & receiver saturation)
+    lora_write_reg(REG_PA_CONFIG, 0x8F);
+    lora_write_reg(0x4D, 0x84); // Default clean PA_DAC (prevents brownout & distortion)
+    lora_write_reg(REG_OCP, 0x2B); // 100mA safe OCP limit
 
     // Step 4: Now switch to Standby (0x89)
     lora_write_reg(REG_OP_MODE, MODE_LORA_BASE | MODE_STDBY);

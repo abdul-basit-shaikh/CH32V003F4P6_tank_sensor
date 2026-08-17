@@ -59,6 +59,8 @@ typedef struct {
   uint16_t sleep_cycle_count;
   uint32_t seq_num;
   uint8_t last_sent_level;
+  uint8_t pending_level;
+  uint8_t wake_retry_count;
   uint8_t filtered_level;
   uint8_t stable_counter;
   bool first_reading_done;
@@ -211,20 +213,15 @@ void enter_deep_sleep(void) {
 
   DEBUG_PRINT("[PWR] Wake\r\n");
 
-  // Visual confirmation of wakeup (brief 20ms LED blink)
-  GPIO_ResetBits(GPIOD, LED_PIN); // Blink ON
-  Delay_Ms(20);
-  GPIO_SetBits(GPIOD, LED_PIN); // Blink OFF
-
   // Essential re-init after deep sleep
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD | RCC_APB2Periph_GPIOC |
                              RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1 |
-                             RCC_APB2Periph_AFIO,
+                             RCC_APB2Periph_AFIO | RCC_APB2Periph_SPI1,
                          ENABLE);
   gpio_init();
   adc_init();
 
-  Delay_Ms(50); // Short stabilization delay
+  Delay_Ms(5); // Short stabilization delay
 }
 
 /* ========== Flash Storage (Last Page 64-byte) ========== */
@@ -275,6 +272,8 @@ static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->sleep_cycle_count = 0;
   runtime->seq_num = 0;
   runtime->last_sent_level = 0xFF;
+  runtime->pending_level = 0xFF;
+  runtime->wake_retry_count = 0;
   runtime->filtered_level = 0;
   runtime->stable_counter = 0;
   runtime->first_reading_done = false;
@@ -460,8 +459,7 @@ static bool packet_matches_data_ack(uint8_t *packet, uint32_t seq_num) {
 
 static tx_wait_result_t
 service_runtime_window(runtime_state_t *runtime, uint32_t wait_ms,
-                       bool listen_for_ack, uint8_t attempt, uint32_t seq_num,
-                       uint8_t sent_level, uint8_t *latest_level) {
+                       bool listen_for_ack, uint8_t attempt, uint32_t seq_num) {
   uint32_t start = millis();
 
   while (1) {
@@ -486,15 +484,6 @@ service_runtime_window(runtime_state_t *runtime, uint32_t wait_ms,
       if (packet_matches_data_ack(rx, seq_num)) {
         DEBUG_PRINT("[ACK] OK(inv) try:%d\r\n", attempt);
         return TX_WAIT_ACK_RECEIVED;
-      }
-    }
-
-    if (g_sensor_event_pending) {
-      g_sensor_event_pending = 0;
-      *latest_level = sample_filtered_level(runtime);
-      if (*latest_level != sent_level) {
-        DEBUG_PRINT("[TX] Lvl update during TX: %d%%\r\n", *latest_level);
-        return TX_WAIT_LEVEL_CHANGED;
       }
     }
 
@@ -543,8 +532,7 @@ static void prepare_data_packet(uint8_t *packet, uint8_t current_level) {
 }
 
 static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
-                                             uint8_t *packet,
-                                             uint8_t *current_level) {
+                                             uint8_t *packet) {
   for (uint8_t attempt = 0; attempt < DATA_MAX_RETRIES; attempt++) {
     radio_power_up_tx();
     radio_set_tx_addr(PAIRING_ADDR);
@@ -558,12 +546,7 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
       radio_send(packet, 32);
 
       tx_wait_result_t gap_result =
-          service_runtime_window(runtime, 10, false, attempt, runtime->seq_num,
-                                 *current_level, current_level);
-      if (gap_result == TX_WAIT_LEVEL_CHANGED) {
-        radio_power_down();
-        return TX_SEND_RESTART_LEVEL;
-      }
+          service_runtime_window(runtime, 10, false, attempt, runtime->seq_num);
       if (gap_result == TX_WAIT_ABORTED) {
         radio_power_down();
         return TX_SEND_ABORTED;
@@ -579,19 +562,14 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
     radio_flush_rx();
     radio_power_up_rx();
 
-    tx_wait_result_t ack_result =
-        service_runtime_window(runtime, DATA_ACK_WAIT_MS, true, attempt,
-                               runtime->seq_num, *current_level, current_level);
+    tx_wait_result_t ack_result = service_runtime_window(
+        runtime, DATA_ACK_WAIT_MS, true, attempt, runtime->seq_num);
     bool rpd_seen = radio_take_rpd();
 
     if (ack_result == TX_WAIT_ACK_RECEIVED) {
       update_link_quality(runtime, attempt, true, rpd_seen);
       radio_power_down();
       return TX_SEND_ACKED;
-    }
-    if (ack_result == TX_WAIT_LEVEL_CHANGED) {
-      radio_power_down();
-      return TX_SEND_RESTART_LEVEL;
     }
     if (ack_result == TX_WAIT_ABORTED) {
       radio_power_down();
@@ -602,12 +580,7 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
 
     if (attempt < DATA_MAX_RETRIES - 1) {
       tx_wait_result_t retry_result = service_runtime_window(
-          runtime, DATA_RETRY_DELAY_MS, false, attempt, runtime->seq_num,
-          *current_level, current_level);
-      if (retry_result == TX_WAIT_LEVEL_CHANGED) {
-        radio_power_down();
-        return TX_SEND_RESTART_LEVEL;
-      }
+          runtime, DATA_RETRY_DELAY_MS, false, attempt, runtime->seq_num);
       if (retry_result == TX_WAIT_ABORTED) {
         radio_power_down();
         return TX_SEND_ABORTED;
@@ -717,10 +690,14 @@ uint8_t read_internal_probes(uint8_t *fault_out) {
   // 2. Take 5 multi-samples over 10ms to filter contact resistance & AC ripple
   uint8_t c25 = 0, c50 = 0, c75 = 0, c100 = 0;
   for (int s = 0; s < 5; s++) {
-    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0) c25++;
-    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0) c50++;
-    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0) c75++;
-    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0) c100++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0)
+      c25++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_50) == 0)
+      c50++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_75) == 0)
+      c75++;
+    if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_100) == 0)
+      c100++;
     Delay_Ms(2);
   }
 
@@ -1121,95 +1098,87 @@ int main(void) {
     // 2. Data Logic (Only if paired)
     if (g_settings.pairing_status == 1) {
       uint8_t current_level = sample_filtered_level(&g_runtime);
-      bool level_changed = (current_level != g_runtime.last_sent_level);
       bool heartbeat_due = (g_runtime.sleep_cycle_count >= HEARTBEAT_CYCLES);
 
-      // --- Battery Internal Logic ---
-      if (g_runtime.last_sent_level == 0xFF || heartbeat_due) {
-        g_runtime.current_battery = read_battery_level();
-        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n", g_runtime.current_battery);
-        Delay_Ms(100); // stabilize battery reading
+      // Track Level Changes & Wake Attempts (Max 3 Wake-ups per level change)
+      if (g_runtime.last_sent_level == 0xFF) {
+        // Initial boot state
+        g_runtime.pending_level = current_level;
+      } else if (current_level != g_runtime.last_sent_level) {
+        if (current_level != g_runtime.pending_level) {
+          // Brand new water level detected! Reset wake retry counter
+          g_runtime.pending_level = current_level;
+          g_runtime.wake_retry_count = 0;
+        }
+      } else {
+        // Level is in sync with last confirmed level
+        g_runtime.pending_level = current_level;
+        g_runtime.wake_retry_count = 0;
       }
 
-      // Send if: First time OR Level changed OR 4 hours heartbeat
-      // But respect cooldown after failed ACK (wait ~1 min)
-      bool need_send =
-          (g_runtime.last_sent_level == 0xFF || level_changed || heartbeat_due);
+      bool level_changed = (current_level != g_runtime.last_sent_level);
 
-      if (level_changed) {
-        // New data! Reset cooldown immediately
-        g_runtime.retry_cooldown = 0;
-      } else if (need_send && g_runtime.retry_cooldown > 0) {
-        g_runtime.retry_cooldown--;
-        if (g_runtime.retry_cooldown > 0) {
-          need_send = false; // Still cooling down, skip this wake
-          DEBUG_PRINT("[TX] Cooldown %d\r\n", g_runtime.retry_cooldown);
+      // Decide if send is required
+      bool need_send = false;
+      if (g_runtime.last_sent_level == 0xFF) {
+        need_send = true; // First send on power-on
+      } else if (level_changed) {
+        if (g_runtime.wake_retry_count < 3) {
+          need_send = true; // Within 3 wake attempts
         }
+      } else if (heartbeat_due) {
+        need_send = true; // 4-hour routine heartbeat
+      }
+
+      // Read battery when sending
+      if (need_send && (g_runtime.last_sent_level == 0xFF || heartbeat_due ||
+                        g_runtime.current_battery == 0)) {
+        g_runtime.current_battery = read_battery_level();
+        DEBUG_PRINT("[BAT] Battery level: %d%%\r\n", g_runtime.current_battery);
+        Delay_Ms(10);
       }
 
       if (need_send) {
         uint8_t packet[32];
-        bool ack_received = false;
-        bool tx_aborted = false;
-        bool send_attempted = false;
-        bool show_tx_feedback = false;
+        prepare_data_packet(packet, current_level);
 
-        while (1) {
-          level_changed = (current_level != g_runtime.last_sent_level);
-          if (!(g_runtime.last_sent_level == 0xFF || level_changed ||
-                heartbeat_due)) {
-            break;
-          }
+        uint8_t current_try = g_runtime.wake_retry_count + 1;
+        DEBUG_PRINT(
+            "[TX] %s Seq:%lu L:%d%% (Wake:%d/3) B:%d%% Q:%u%% R:%u F:%d\r\n",
+            level_changed ? "CHG" : "HB", (unsigned long)g_runtime.seq_num,
+            current_level, current_try, g_runtime.current_battery,
+            g_runtime.link_quality, g_runtime.last_rpd_seen, g_probe_fault);
 
-          prepare_data_packet(packet, current_level);
-          DEBUG_PRINT("[TX] %s Seq:%lu L:%d%% B:%d%% Q:%u%% R:%u F:%d\r\n",
-                      level_changed ? "CHG" : "HB",
-                      (unsigned long)g_runtime.seq_num, current_level,
-                      g_runtime.current_battery, g_runtime.link_quality,
-                      g_runtime.last_rpd_seen, g_probe_fault);
+        tx_send_result_t tx_result = send_data_with_retry(&g_runtime, packet);
 
-          send_attempted = true;
-          tx_send_result_t tx_result =
-              send_data_with_retry(&g_runtime, packet, &current_level);
-
-          if (tx_result == TX_SEND_RESTART_LEVEL) {
-            g_runtime.retry_cooldown = 0;
-            g_runtime.seq_num++;
-            continue;
-          }
-
-          if (tx_result == TX_SEND_ABORTED) {
-            tx_aborted = true;
-            break;
-          }
-
-          ack_received = (tx_result == TX_SEND_ACKED);
-          show_tx_feedback = true;
-          if (!ack_received) {
-            DEBUG_PRINT("[TX] NO ACK after %d tries\r\n", DATA_MAX_RETRIES);
-            g_runtime.retry_cooldown = 4;
-          } else {
-            g_runtime.last_sent_level = current_level;
-            g_runtime.seq_num++;
-            g_runtime.retry_cooldown = 0;
-          }
-          break;
-        }
-
-        if (tx_aborted) {
+        if (tx_result == TX_SEND_ABORTED) {
           continue;
         }
 
-        if (send_attempted) {
-          g_runtime.sleep_cycle_count = 0;
+        bool ack_received = (tx_result == TX_SEND_ACKED);
+        if (ack_received) {
+          // Success! Confirmed by controller
+          g_runtime.last_sent_level = current_level;
+          g_runtime.pending_level = current_level;
+          g_runtime.wake_retry_count = 0;
+          g_runtime.seq_num++;
+        } else {
+          // NO ACK after DATA_MAX_RETRIES (15 tries)
+          DEBUG_PRINT("[TX] NO ACK on wake attempt %d/3 after %d retries\r\n",
+                      current_try, DATA_MAX_RETRIES);
+          g_runtime.wake_retry_count++;
+          g_runtime.seq_num++;
 
-          if (show_tx_feedback) {
-            // LED: fast blink=ACK ok, slow blink=no ACK
-            GPIO_ResetBits(GPIOD, LED_PIN);
-            Delay_Ms(ack_received ? 50 : 500);
-            GPIO_SetBits(GPIOD, LED_PIN);
+          if (g_runtime.wake_retry_count >= 3) {
+            // Stop sending after 3 wake attempts
+            g_runtime.last_sent_level = current_level;
+            DEBUG_PRINT("[SYS] 3 wake attempts done without ACK. Level %d%% "
+                        "stopped.\r\n",
+                        current_level);
           }
         }
+
+        g_runtime.sleep_cycle_count = 0;
       }
     } else {
       DEBUG_PRINT("[SYS] Not paired. Hold button to pair.\r\n");
