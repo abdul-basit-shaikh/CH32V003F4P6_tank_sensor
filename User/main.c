@@ -53,7 +53,10 @@ void run_pairing(void);
 uint32_t millis(void);
 uint8_t calculate_checksum(const uint8_t *data, uint8_t length);
 
-typedef struct {
+typedef struct runtime_state runtime_state_t;
+static void send_instant_force_update(runtime_state_t *runtime);
+
+typedef struct runtime_state {
   uint32_t button_press_start;
   bool pairing_triggered;
   uint16_t sleep_cycle_count;
@@ -75,7 +78,8 @@ typedef struct {
 
 typedef enum {
   BUTTON_ACTION_NONE = 0,
-  BUTTON_ACTION_RESET,
+  BUTTON_ACTION_FORCE_SEND,
+  BUTTON_ACTION_REBOOT,
   BUTTON_ACTION_FACTORY_RESET,
 } button_action_t;
 
@@ -183,7 +187,12 @@ void EXTI7_0_IRQHandler(void) {
 
 void enter_deep_sleep(void) {
   DEBUG_PRINT("[PWR] Sleep (5s AWU)...\r\n");
-  Delay_Ms(30); // Flush UART
+  Delay_Ms(5); // Flush UART
+
+  // Ensure all power pins & LEDs are OFF during deep sleep
+  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN);
+  GPIO_SetBits(GPIOD, LED_PIN); // Active-low: HIGH = OFF
+  radio_power_down();           // Ensure SX1278 is in 0.2uA Sleep Mode
 
   // 1. Re-arm Auto Wakeup (AWU) timer before EVERY sleep
   RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
@@ -389,7 +398,7 @@ static button_action_t poll_button_action(runtime_state_t *runtime) {
     }
 
     if (!runtime->pairing_triggered &&
-        (now - runtime->button_press_start) > RESET_PRESS_TIME_MS) {
+        (now - runtime->button_press_start) >= RESET_PRESS_TIME_MS) {
       runtime->pairing_triggered = true;
       return BUTTON_ACTION_FACTORY_RESET;
     }
@@ -404,17 +413,21 @@ static button_action_t poll_button_action(runtime_state_t *runtime) {
   uint32_t held_ms = millis() - runtime->button_press_start;
   runtime->button_press_start = 0;
 
-  if (!runtime->pairing_triggered && held_ms > 10 &&
-      held_ms < RESET_PRESS_TIME_MS) {
+  if (runtime->pairing_triggered) {
     runtime->pairing_triggered = false;
-    if (g_settings.pairing_status == 1) {
-      return BUTTON_ACTION_RESET;
-    }
-
     return BUTTON_ACTION_NONE;
   }
 
-  runtime->pairing_triggered = false;
+  // 3s to 5s Hold -> Device Reboot (Keeps pairing ID intact)
+  if (held_ms >= REBOOT_PRESS_TIME_MS && held_ms < RESET_PRESS_TIME_MS) {
+    return BUTTON_ACTION_REBOOT;
+  }
+
+  // 50ms to 3s Click -> Force Instant Send
+  if (held_ms >= 50 && held_ms < REBOOT_PRESS_TIME_MS) {
+    return BUTTON_ACTION_FORCE_SEND;
+  }
+
   return BUTTON_ACTION_NONE;
 }
 
@@ -450,7 +463,7 @@ static void handle_button_action(runtime_state_t *runtime,
   }
 
   if (action == BUTTON_ACTION_FACTORY_RESET) {
-    DEBUG_PRINT("[SYS] FACTORY RESET\r\n");
+    DEBUG_PRINT("[SYS] FACTORY RESET (>5s Hold)\r\n");
 
     if (g_settings.pairing_status == 1 && g_settings.tank_id != 0) {
       send_unpair_before_reset();
@@ -465,9 +478,23 @@ static void handle_button_action(runtime_state_t *runtime,
     return;
   }
 
-  DEBUG_PRINT("[SYS] Click -> Reset\r\n");
-  Delay_Ms(100);
-  NVIC->SCTLR |= (1 << 31); // SYSRESETREQ
+  if (action == BUTTON_ACTION_REBOOT) {
+    DEBUG_PRINT("[SYS] Reboot (3s Hold)...\r\n");
+    // 2 slow blinks before restart
+    for (int b = 0; b < 2; b++) {
+      GPIO_ResetBits(GPIOD, LED_PIN);
+      Delay_Ms(150);
+      GPIO_SetBits(GPIOD, LED_PIN);
+      Delay_Ms(150);
+    }
+    NVIC->SCTLR |= (1 << 31); // SYSRESETREQ
+    return;
+  }
+
+  if (action == BUTTON_ACTION_FORCE_SEND) {
+    send_instant_force_update(runtime);
+    return;
+  }
 }
 
 static bool packet_matches_data_ack(uint8_t *packet, uint32_t seq_num) {
@@ -618,6 +645,36 @@ static tx_send_result_t send_data_with_retry(runtime_state_t *runtime,
   return TX_SEND_NO_ACK;
 }
 
+static void send_instant_force_update(runtime_state_t *runtime) {
+  DEBUG_PRINT("[SYS] Single Click -> Force Instant Send\r\n");
+
+  // 1 Fast Blink Acknowledgement
+  GPIO_ResetBits(GPIOD, LED_PIN);
+  Delay_Ms(50);
+  GPIO_SetBits(GPIOD, LED_PIN);
+
+  if (g_settings.pairing_status != 1) {
+    DEBUG_PRINT("[SYS] Not Paired -> Run Pairing\r\n");
+    return;
+  }
+
+  uint8_t current_level = read_tank_level();
+  runtime->filtered_level = current_level;
+  runtime->last_sent_level = current_level;
+  runtime->sleep_cycle_count = 0;
+  read_battery_level();
+
+  uint8_t packet[32];
+  prepare_data_packet(packet, current_level);
+  tx_send_result_t res = send_data_with_retry(runtime, packet);
+  if (res == TX_SEND_ACKED) {
+    runtime->seq_num++;
+    DEBUG_PRINT("[DATA] Force Send -> ACK OK\r\n");
+  } else {
+    DEBUG_PRINT("[DATA] Force Send -> No ACK\r\n");
+  }
+}
+
 /* ========== TIM2 for millis (1ms) ========== */
 void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void TIM2_IRQHandler(void) {
@@ -711,9 +768,9 @@ void gpio_init(void) {
 uint8_t read_internal_probes(uint8_t *fault_out) {
   // 1. Power ON the common probe wire (PD3)
   GPIO_SetBits(GPIOD, SENSOR_POWER_PIN);
-  Delay_Ms(PROBE_SETTLE_DELAY_MS); // Allow water conductivity & transistor junction to stabilize
+  Delay_Ms(PROBE_SETTLE_DELAY_MS); // 10ms robust stabilization for long tank wires & low-TDS water
 
-  // 2. Take multi-samples to filter contact resistance & AC ripple
+  // 2. Take multi-samples to filter contact resistance & AC ripple (2ms multi-sample)
   uint8_t c25 = 0, c50 = 0, c75 = 0, c100 = 0;
   for (int s = 0; s < PROBE_SAMPLE_COUNT; s++) {
     if (GPIO_ReadInputDataBit(GPIOC, SENSOR_PIN_25) == 0)
@@ -844,33 +901,29 @@ uint16_t get_adc_val(uint8_t ch) {
 }
 
 static uint8_t voltage_to_battery_percent(uint32_t v_bat_mv) {
-  if (v_bat_mv >= 3100)
+  if (v_bat_mv >= 3150)
     return 100;
-  if (v_bat_mv >= 3000) {
-    // 3000..3100 mV -> 85%..100%
-    return (uint8_t)(85 + ((v_bat_mv - 3000) * 15) / 100);
+  if (v_bat_mv >= 3050) {
+    // 3050..3150 mV -> 80%..100%
+    return (uint8_t)(80 + ((v_bat_mv - 3050) * 20) / 100);
   }
-  if (v_bat_mv >= 2900) {
-    // 2900..3000 mV -> 65%..85%
-    return (uint8_t)(65 + ((v_bat_mv - 2900) * 20) / 100);
+  if (v_bat_mv >= 2950) {
+    // 2950..3050 mV -> 50%..80%
+    return (uint8_t)(50 + ((v_bat_mv - 2950) * 30) / 100);
+  }
+  if (v_bat_mv >= 2880) {
+    // 2880..2950 mV -> 20%..50%
+    return (uint8_t)(20 + ((v_bat_mv - 2880) * 30) / 70);
+  }
+  if (v_bat_mv >= 2820) {
+    // 2820..2880 mV -> 5%..20% (Low Battery Warning Zone)
+    return (uint8_t)(5 + ((v_bat_mv - 2820) * 15) / 60);
   }
   if (v_bat_mv >= 2800) {
-    // 2800..2900 mV -> 40%..65%
-    return (uint8_t)(40 + ((v_bat_mv - 2800) * 25) / 100);
+    // 2800..2820 mV -> 0%..5% (Critical Zone - Replace Battery)
+    return (uint8_t)(((v_bat_mv - 2800) * 5) / 20);
   }
-  if (v_bat_mv >= 2750) {
-    // 2750..2800 mV -> 20%..40%
-    return (uint8_t)(20 + ((v_bat_mv - 2750) * 20) / 50);
-  }
-  if (v_bat_mv >= 2700) {
-    // 2700..2750 mV -> 5%..20%
-    return (uint8_t)(5 + ((v_bat_mv - 2700) * 15) / 50);
-  }
-  if (v_bat_mv >= 2650) {
-    // 2650..2700 mV -> 0%..5%
-    return (uint8_t)(((v_bat_mv - 2650) * 5) / 50);
-  }
-  return 0;
+  return 0; // Below 2.80V = 0% (Working Cutoff)
 }
 
 uint8_t read_battery_level(void) {
@@ -1015,22 +1068,25 @@ void run_pairing(void) {
       break;
     }
 
-    // LED blink pattern
-    if ((i % 2) < 1)
-      GPIO_ResetBits(GPIOD, LED_PIN);
-    else
-      GPIO_SetBits(GPIOD, LED_PIN);
+    // 1. Ensure LED is OFF during TX to save 10mA current load
+    GPIO_SetBits(GPIOD, LED_PIN);
 
-    // 1. Send pairing request
+    // 2. Send pairing request (Soft-Start + 30ms pre-charge)
     radio_power_up_tx();
     radio_set_tx_addr(PAIRING_ADDR);
     radio_send(packet, 32);
 
-    // 2. Flush RX FIFO + switch to RX to listen for controller ACK
+    // 3. Flush RX FIFO + switch to RX to listen for controller ACK
     radio_flush_rx();
     radio_power_up_rx();
 
-    // 3. Wait for ACK from controller
+    // 4. Visual LED blink during RX listening window
+    if ((i % 2) < 1)
+      GPIO_ResetBits(GPIOD, LED_PIN); // LED ON during RX
+    else
+      GPIO_SetBits(GPIOD, LED_PIN);  // LED OFF
+
+    // 5. Wait for ACK from controller
     uint32_t start = millis();
     while ((millis() - start) < PAIRING_ACK_WAIT_MS) {
       if (radio_available()) {
@@ -1160,12 +1216,12 @@ int main(void) {
     DEBUG_PRINT("[SYS] NOT PAIRED. Hold button to pair\r\n");
   }
 
-  // Boot UI: Triple blink (500ms ON, 500ms OFF)
-  for (int i = 0; i < 3; i++) {
+  // Boot UI: Fast 5x blink (60ms ON, 60ms OFF = 360ms total)
+  for (int i = 0; i < 5; i++) {
     GPIO_ResetBits(GPIOD, LED_PIN); // ON
-    Delay_Ms(500);
+    Delay_Ms(100);
     GPIO_SetBits(GPIOD, LED_PIN); // OFF
-    Delay_Ms(500);
+    Delay_Ms(100);
   }
   GPIO_SetBits(GPIOD, LED_PIN); // Extra safety: ensure LED is OFF
 

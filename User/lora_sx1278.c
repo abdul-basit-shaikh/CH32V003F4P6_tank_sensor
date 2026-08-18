@@ -231,7 +231,7 @@ uint8_t lora_send(const uint8_t *buf, size_t size) {
 
     // 1. Enter Standby (0x89) & allow 100uF capacitor to fully charge
     lora_write_reg(REG_OP_MODE, MODE_LORA_BASE | MODE_STDBY);
-    Delay_Ms(10);
+    Delay_Ms(30); // 30ms Pre-TX Capacitor Charge Delay
 
     // 2. Load FIFO
     lora_write_reg(REG_FIFO_ADDR_PTR, 0x00);

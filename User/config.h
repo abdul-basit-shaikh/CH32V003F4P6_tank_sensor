@@ -57,8 +57,8 @@
 #define LEVEL_DEBOUNCE_CYCLES   2  // Consecutive wake cycles required to confirm level change (~10s anti-slosh)
 #define PROBE_SAMPLE_COUNT      5  // Number of multi-samples per reading
 #define PROBE_MAJORITY_VOTE     3  // >= 3 out of 5 (> 50% true majority) to declare probe wet
-#define PROBE_SETTLE_DELAY_MS   3  // Probe stabilization delay in ms (optimized for low power)
-#define BATTERY_LOW_THRESHOLD   25 // Warn at ~2.85V for the 2.7V-3.3V range
+#define PROBE_SETTLE_DELAY_MS   10 // Robust 10ms probe stabilization (handles long wires & low TDS water)
+#define BATTERY_LOW_THRESHOLD   20 // Warn at <= 20% (approx 2.88V) 
 #define SENSOR_ERROR_VAL        0xFE
 
 // =============================================================
@@ -114,7 +114,8 @@ extern const uint8_t PAIRING_ADDR[3];
 
 // Timing
 #define BOOT_SAFETY_DELAY_MS                    5000
-#define RESET_PRESS_TIME_MS                     5000
+#define REBOOT_PRESS_TIME_MS                    3000 // 3s hold -> Device Reboot
+#define RESET_PRESS_TIME_MS                     5000 // 5s hold -> Factory Reset & Pairing Mode
 #define PAIRING_TIME_MINS                       1
 #define PAIRING_BURST_COUNT                     ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_ACK_WAIT_MS)
 
