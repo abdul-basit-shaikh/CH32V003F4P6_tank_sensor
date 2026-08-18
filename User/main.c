@@ -47,11 +47,18 @@ void timer_init(void);
 void enter_deep_sleep(void);
 void flash_read_settings(void);
 void flash_save_settings(void);
+void iwdg_init(void);
 uint8_t read_tank_level(void);
 uint8_t read_battery_level(void);
 void run_pairing(void);
 uint32_t millis(void);
 uint8_t calculate_checksum(const uint8_t *data, uint8_t length);
+
+static inline void iwdg_feed(void) {
+#if ENABLE_HARDWARE_IWDG
+  IWDG_ReloadCounter();
+#endif
+}
 
 typedef struct runtime_state runtime_state_t;
 static void send_instant_force_update(runtime_state_t *runtime);
@@ -210,7 +217,9 @@ void enter_deep_sleep(void) {
   PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
   NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
 
+  iwdg_feed(); // Feed watchdog right before sleeping (8s window for 5s sleep)
   __WFI(); // Wait for Interrupt (AWU timer fires in 5s OR user presses button)
+  iwdg_feed(); // Feed watchdog immediately upon waking
 
   // 4. Cleanup sleep state
   NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP
@@ -235,11 +244,16 @@ void enter_deep_sleep(void) {
   Delay_Ms(5); // Short stabilization delay
 }
 
-/* ========== Flash Storage (Last Page 64-byte) ========== */
+/* ========== Flash Storage (Last Page 64-byte) with CRC-8 Integrity ========== */
 #define SETTINGS_FLASH_ADDR 0x08003FC0
-typedef struct {
-  uint16_t tank_id;
-  uint8_t pairing_status; // 1 = Paired, 0 = Not Paired
+#define SETTINGS_MAGIC      0xAA55
+
+typedef struct __attribute__((packed)) {
+  uint16_t magic;          // 0xAA55 Signature
+  uint16_t tank_id;        // 16-bit Tank ID
+  uint8_t  pairing_status; // 1 = Paired, 0 = Not Paired
+  uint8_t  crc8;           // CRC-8 checksum of first 5 bytes
+  uint16_t reserved;       // Padding to 8 bytes (two 32-bit words)
 } sensor_settings_t;
 
 sensor_settings_t g_settings;
@@ -247,14 +261,38 @@ sensor_settings_t g_settings;
 void flash_read_settings(void) {
   memcpy(&g_settings, (void *)SETTINGS_FLASH_ADDR, sizeof(sensor_settings_t));
 
-  // Check if data is valid (not empty flash 0xFF)
-  if (g_settings.tank_id == 0xFFFF) {
+  // 1. Check Magic Header (0xAA55)
+  if (g_settings.magic != SETTINGS_MAGIC) {
+    DEBUG_PRINT("[FL] Magic 0x%04X != 0xAA55 -> Unprogrammed Flash. Init defaults.\r\n",
+                g_settings.magic);
+    g_settings.magic = SETTINGS_MAGIC;
     g_settings.tank_id = 0;
     g_settings.pairing_status = 0;
+    g_settings.crc8 = 0;
+    return;
   }
+
+  // 2. Validate CRC-8 Checksum over first 5 bytes (magic + tank_id + pairing_status)
+  uint8_t calc_crc = calculate_checksum((const uint8_t *)&g_settings, 5);
+  if (g_settings.crc8 != calc_crc) {
+    DEBUG_PRINT("[FL] CRC Error (Read:0x%02X != Calc:0x%02X)! Flash Corrupted -> Reset defaults.\r\n",
+                g_settings.crc8, calc_crc);
+    g_settings.magic = SETTINGS_MAGIC;
+    g_settings.tank_id = 0;
+    g_settings.pairing_status = 0;
+    g_settings.crc8 = 0;
+    return;
+  }
+
+  DEBUG_PRINT("[FL] Loaded Valid Settings (ID:0x%04X Status:%d CRC:0x%02X)\r\n",
+              g_settings.tank_id, g_settings.pairing_status, g_settings.crc8);
 }
 
 void flash_save_settings(void) {
+  g_settings.magic = SETTINGS_MAGIC;
+  g_settings.crc8 = calculate_checksum((const uint8_t *)&g_settings, 5);
+  g_settings.reserved = 0;
+
   FLASH_Unlock();
   FLASH_ErasePage(SETTINGS_FLASH_ADDR);
 
@@ -263,8 +301,20 @@ void flash_save_settings(void) {
     FLASH_ProgramWord(SETTINGS_FLASH_ADDR + (i * 4), pData[i]);
   }
   FLASH_Lock();
-  DEBUG_PRINT("[FL] Saved ID:0x%04X S:%d\r\n", g_settings.tank_id,
-              g_settings.pairing_status);
+  DEBUG_PRINT("[FL] Saved ID:0x%04X S:%d CRC:0x%02X\r\n", g_settings.tank_id,
+              g_settings.pairing_status, g_settings.crc8);
+}
+
+/* ========== Independent Hardware Watchdog (IWDG) ========== */
+void iwdg_init(void) {
+#if ENABLE_HARDWARE_IWDG
+  IWDG_WriteAccessCmd(IWDG_WriteAccess_Enable);
+  IWDG_SetPrescaler(IWDG_Prescaler_256); // 128kHz / 256 = 500Hz (2ms per tick)
+  IWDG_SetReload(IWDG_RELOAD_VALUE);     // 4000 ticks = 8.0 seconds timeout
+  IWDG_ReloadCounter();
+  IWDG_Enable();
+  DEBUG_PRINT("[SYS] Hardware IWDG Watchdog Initialized (~10s Timeout)\r\n");
+#endif
 }
 
 /* ========== Global Variables ========== */
@@ -551,6 +601,7 @@ service_runtime_window(runtime_state_t *runtime, uint32_t wait_ms,
       }
     }
 
+    iwdg_feed(); // Feed watchdog during active listening window
     Delay_Ms(1);
   }
 
@@ -1028,7 +1079,7 @@ uint8_t calculate_checksum(const uint8_t *data, uint8_t length) {
 
 void run_pairing(void) {
   radio_init();
-  Delay_Ms(100);
+  Delay_Ms(500);
 
   uint16_t new_id = generate_new_tank_id();
   DEBUG_PRINT("\r\n[PAIR] NewID:0x%04X\r\n", new_id);
@@ -1067,6 +1118,8 @@ void run_pairing(void) {
                   PAIRING_TIME_MINS);
       break;
     }
+
+    iwdg_feed(); // Feed watchdog on each pairing burst
 
     // 1. Ensure LED is OFF during TX to save 10mA current load
     GPIO_SetBits(GPIOD, LED_PIN);
@@ -1229,7 +1282,12 @@ int main(void) {
 
   reset_runtime_tracking(&g_runtime);
 
+  // Initialize Independent Hardware Watchdog (~8s Zero-Freeze Protection)
+  iwdg_init();
+
   while (1) {
+    iwdg_feed(); // Feed watchdog at start of each cycle
+
     // 1. Button Handling
     bool button_pressed = is_button_pressed();
     if (g_button_event_pending || g_runtime.button_press_start != 0 ||

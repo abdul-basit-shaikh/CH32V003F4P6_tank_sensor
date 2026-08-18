@@ -119,4 +119,8 @@ extern const uint8_t PAIRING_ADDR[3];
 #define PAIRING_TIME_MINS                       1
 #define PAIRING_BURST_COUNT                     ((PAIRING_TIME_MINS * 60 * 1000) / PAIRING_ACK_WAIT_MS)
 
+// Hardware Watchdog (IWDG) Configuration
+#define ENABLE_HARDWARE_IWDG                    1    // 1 = Enabled (~10s hardware timeout), 0 = Disabled
+#define IWDG_RELOAD_VALUE                       4095 // 4095 (Max 12-bit 0x0FFF) * 256 / 100-128kHz LSI = ~8.2s-10.0s timeout
+
 #endif
