@@ -91,7 +91,7 @@
 // Heartbeat interval in hours (Formula: Hours * 60min * 60sec * 1000ms)
 // Deep Sleep Settings
 #define HEARTBEAT_HOURS         4
-#define AWU_SLEEP_SEC           1 // Wake up every ~1 second for fast responsive detection
+#define AWU_SLEEP_SEC           5 // Wake up every ~5 seconds (matches actual 5s AWU sleep window)
 #define HEARTBEAT_CYCLES        ((HEARTBEAT_HOURS * 3600) / AWU_SLEEP_SEC)
 
 // Protocol Constants - 3-byte address for pairing

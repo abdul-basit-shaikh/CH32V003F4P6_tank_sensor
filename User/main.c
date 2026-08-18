@@ -718,8 +718,8 @@ static void send_instant_force_update(runtime_state_t *runtime) {
   uint8_t packet[32];
   prepare_data_packet(packet, current_level);
   tx_send_result_t res = send_data_with_retry(runtime, packet);
+  runtime->seq_num++; // Always advance sequence number for fresh tracking
   if (res == TX_SEND_ACKED) {
-    runtime->seq_num++;
     DEBUG_PRINT("[DATA] Force Send -> ACK OK\r\n");
   } else {
     DEBUG_PRINT("[DATA] Force Send -> No ACK\r\n");
