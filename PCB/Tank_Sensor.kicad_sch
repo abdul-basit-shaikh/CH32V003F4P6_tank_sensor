@@ -3408,6 +3408,16 @@
 	)
 	(wire
 		(pts
+			(xy 270.51 186.69) (xy 270 183.81)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c7199314-5ff7-4f95-b73c-90230b271efa")
+	)
+	(wire
+		(pts
 			(xy 295.91 148.59) (xy 295.91 149.86)
 		)
 		(stroke
@@ -3425,6 +3435,16 @@
 			(type default)
 		)
 		(uuid "f7e47b74-caa5-423a-82ca-654c04723daf")
+	)
+	(wire
+		(pts
+			(xy 270.51 172.72) (xy 270 176.19)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fc0d5115-db49-4b36-908d-e8bb408af147")
 	)
 	(wire
 		(pts
@@ -3861,7 +3881,7 @@
 		(uuid "c0000085-0001-4000-9000-000000000001")
 	)
 	(label "LED_DRIVE"
-		(at 270 176.19 90)
+		(at 270.51 172.72 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -3870,7 +3890,7 @@
 		(uuid "c0000090-0001-4000-9000-000000000001")
 	)
 	(label "LED_A"
-		(at 270 183.81 90)
+		(at 270.51 186.69 0)
 		(effects
 			(font
 				(size 1.27 1.27)
