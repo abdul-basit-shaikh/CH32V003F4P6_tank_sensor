@@ -1,0 +1,287 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator "kicad_symbol_editor")
+  (generator_version "8.0")
+
+  ;; ============================================================
+  ;; CH32V003F4P6 — RISC-V MCU — TSSOP-20
+  ;; ============================================================
+  (symbol "CH32V003F4P6"
+    (pin_names (offset 1.016))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "U"
+      (at 0 16.51 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "CH32V003F4P6"
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "https://www.wch-ic.com/products/CH32V003.html"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "ki_description" "32-bit RISC-V MCU, 16KB Flash, 2KB SRAM, TSSOP-20"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+
+    ;; Body rectangle
+    (symbol "CH32V003F4P6_0_1"
+      (rectangle
+        (start -7.62 13.97)
+        (end 7.62 -13.97)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+    )
+
+    ;; Pins
+    (symbol "CH32V003F4P6_1_1"
+
+      ;; ---- Top: VDD (Pin 9) ----
+      (pin power_in line
+        (at 0 16.51 270) (length 2.54)
+        (name "VDD" (effects (font (size 1.016 1.016))))
+        (number "9" (effects (font (size 1.016 1.016))))
+      )
+
+      ;; ---- Bottom: VSS (Pin 7) ----
+      (pin power_in line
+        (at 0 -16.51 90) (length 2.54)
+        (name "VSS" (effects (font (size 1.016 1.016))))
+        (number "7" (effects (font (size 1.016 1.016))))
+      )
+
+      ;; ---- Left Side (angle 0 = extends right into body) ----
+
+      ;; NRST / PD7 (Pin 4)
+      (pin input line
+        (at -10.16 10.16 0) (length 2.54)
+        (name "~{NRST}/PD7" (effects (font (size 1.016 1.016))))
+        (number "4" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD1 / SWIO (Pin 18)
+      (pin bidirectional line
+        (at -10.16 7.62 0) (length 2.54)
+        (name "PD1/SWIO" (effects (font (size 1.016 1.016))))
+        (number "18" (effects (font (size 1.016 1.016))))
+      )
+      ;; PA1 / ADC_CH1 (Pin 5)
+      (pin input line
+        (at -10.16 5.08 0) (length 2.54)
+        (name "PA1/ADC1" (effects (font (size 1.016 1.016))))
+        (number "5" (effects (font (size 1.016 1.016))))
+      )
+      ;; PA2 (Pin 6)
+      (pin bidirectional line
+        (at -10.16 2.54 0) (length 2.54)
+        (name "PA2" (effects (font (size 1.016 1.016))))
+        (number "6" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD0 (Pin 8)
+      (pin bidirectional line
+        (at -10.16 0 0) (length 2.54)
+        (name "PD0" (effects (font (size 1.016 1.016))))
+        (number "8" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD3 (Pin 20)
+      (pin bidirectional line
+        (at -10.16 -2.54 0) (length 2.54)
+        (name "PD3" (effects (font (size 1.016 1.016))))
+        (number "20" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD5 / USART1_TX (Pin 2)
+      (pin output line
+        (at -10.16 -5.08 0) (length 2.54)
+        (name "PD5/UTX" (effects (font (size 1.016 1.016))))
+        (number "2" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD6 (Pin 3)
+      (pin input line
+        (at -10.16 -7.62 0) (length 2.54)
+        (name "PD6" (effects (font (size 1.016 1.016))))
+        (number "3" (effects (font (size 1.016 1.016))))
+      )
+      ;; PD2 (Pin 19)
+      (pin output line
+        (at -10.16 -10.16 0) (length 2.54)
+        (name "PD2" (effects (font (size 1.016 1.016))))
+        (number "19" (effects (font (size 1.016 1.016))))
+      )
+
+      ;; ---- Right Side (angle 180 = extends left into body) ----
+
+      ;; PD4 (Pin 1) - LoRa RST / NRF CE
+      (pin output line
+        (at 10.16 10.16 180) (length 2.54)
+        (name "PD4" (effects (font (size 1.016 1.016))))
+        (number "1" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC5 / SPI1_SCK (Pin 15)
+      (pin output line
+        (at 10.16 7.62 180) (length 2.54)
+        (name "PC5/SCK" (effects (font (size 1.016 1.016))))
+        (number "15" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC6 / SPI1_MOSI (Pin 16)
+      (pin output line
+        (at 10.16 5.08 180) (length 2.54)
+        (name "PC6/MOSI" (effects (font (size 1.016 1.016))))
+        (number "16" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC7 / SPI1_MISO (Pin 17)
+      (pin input line
+        (at 10.16 2.54 180) (length 2.54)
+        (name "PC7/MISO" (effects (font (size 1.016 1.016))))
+        (number "17" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC3 / NSS (Pin 13)
+      (pin output line
+        (at 10.16 0 180) (length 2.54)
+        (name "PC3/NSS" (effects (font (size 1.016 1.016))))
+        (number "13" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC0 (Pin 10) - Sensor 25%
+      (pin bidirectional line
+        (at 10.16 -2.54 180) (length 2.54)
+        (name "PC0" (effects (font (size 1.016 1.016))))
+        (number "10" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC1 (Pin 11) - Sensor 50%
+      (pin bidirectional line
+        (at 10.16 -5.08 180) (length 2.54)
+        (name "PC1" (effects (font (size 1.016 1.016))))
+        (number "11" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC2 (Pin 12) - Sensor 75%
+      (pin bidirectional line
+        (at 10.16 -7.62 180) (length 2.54)
+        (name "PC2" (effects (font (size 1.016 1.016))))
+        (number "12" (effects (font (size 1.016 1.016))))
+      )
+      ;; PC4 (Pin 14) - Sensor 100%
+      (pin bidirectional line
+        (at 10.16 -10.16 180) (length 2.54)
+        (name "PC4" (effects (font (size 1.016 1.016))))
+        (number "14" (effects (font (size 1.016 1.016))))
+      )
+    )
+  )
+
+  ;; ============================================================
+  ;; Ra-02 LoRa Module (Ai-Thinker) — SX1278 433MHz
+  ;; ============================================================
+  (symbol "Ra-02_LoRa"
+    (pin_names (offset 1.016))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "U"
+      (at 0 10.16 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "Ra-02_LoRa"
+      (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" ""
+      (at 0 -12.7 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "https://docs.ai-thinker.com/en/lora/man"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "ki_description" "SX1278 LoRa 433MHz Module, SPI Interface"
+      (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+
+    ;; Body rectangle
+    (symbol "Ra-02_LoRa_0_1"
+      (rectangle
+        (start -7.62 8.89)
+        (end 7.62 -8.89)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+      ;; Antenna symbol on right
+      (polyline
+        (pts (xy 7.62 -5.08) (xy 9.144 -5.08) (xy 8.382 -3.81) (xy 9.906 -3.81))
+        (stroke (width 0.254) (type default))
+        (fill (type none))
+      )
+    )
+
+    ;; Pins
+    (symbol "Ra-02_LoRa_1_1"
+
+      ;; ---- Left Side (inputs / power) ----
+
+      ;; VCC
+      (pin power_in line
+        (at -10.16 6.35 0) (length 2.54)
+        (name "VCC" (effects (font (size 1.016 1.016))))
+        (number "1" (effects (font (size 1.016 1.016))))
+      )
+      ;; GND
+      (pin power_in line
+        (at -10.16 3.81 0) (length 2.54)
+        (name "GND" (effects (font (size 1.016 1.016))))
+        (number "2" (effects (font (size 1.016 1.016))))
+      )
+      ;; SCK
+      (pin input line
+        (at -10.16 1.27 0) (length 2.54)
+        (name "SCK" (effects (font (size 1.016 1.016))))
+        (number "3" (effects (font (size 1.016 1.016))))
+      )
+      ;; MOSI
+      (pin input line
+        (at -10.16 -1.27 0) (length 2.54)
+        (name "MOSI" (effects (font (size 1.016 1.016))))
+        (number "4" (effects (font (size 1.016 1.016))))
+      )
+      ;; NSS (Chip Select)
+      (pin input line
+        (at -10.16 -3.81 0) (length 2.54)
+        (name "NSS" (effects (font (size 1.016 1.016))))
+        (number "5" (effects (font (size 1.016 1.016))))
+      )
+      ;; RST (Reset)
+      (pin input line
+        (at -10.16 -6.35 0) (length 2.54)
+        (name "RST" (effects (font (size 1.016 1.016))))
+        (number "6" (effects (font (size 1.016 1.016))))
+      )
+
+      ;; ---- Right Side (outputs) ----
+
+      ;; MISO
+      (pin output line
+        (at 10.16 3.81 180) (length 2.54)
+        (name "MISO" (effects (font (size 1.016 1.016))))
+        (number "7" (effects (font (size 1.016 1.016))))
+      )
+      ;; DIO0 (Interrupt output)
+      (pin output line
+        (at 10.16 0 180) (length 2.54)
+        (name "DIO0" (effects (font (size 1.016 1.016))))
+        (number "8" (effects (font (size 1.016 1.016))))
+      )
+      ;; ANT (Antenna, IPEX connector)
+      (pin passive line
+        (at 10.16 -3.81 180) (length 2.54)
+        (name "ANT" (effects (font (size 1.016 1.016))))
+        (number "9" (effects (font (size 1.016 1.016))))
+      )
+    )
+  )
+)

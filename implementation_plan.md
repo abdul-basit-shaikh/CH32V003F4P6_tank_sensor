@@ -17,7 +17,7 @@ Reads 4 water level probes (via BC547 NPN transistors), monitors battery voltage
 | 2 | PD5 | USART TX | **Debug UART TX** | Output | Optional — remove for production |
 | 3 | PD6 | GPIO In | **Push Button** | Input (Pull-up) | Active LOW, EXTI wake from sleep |
 | 4 | PD7 | NRST | **Reset Circuit** | Input | 10kΩ pull-up + 104 (100nF) cap |
-| 5 | PA1 | ADC Ch1 | **Battery Voltage ADC** | Analog In | Via 100kΩ/100kΩ divider |
+| 5 | PA1 | GPIO / ADC | **NC** (Spare) | — | Battery monitoring uses internal 1.20V Vref (0µA drain) |
 | 6 | PA2 | GPIO | **NC** (Reserved) | — | Spare — test pad optional |
 | 7 | VSS | GND | **Ground** | Power | Connect to ground plane |
 | 8 | PD0 | GPIO | **NC** (Available) | — | Spare GPIO |
@@ -32,7 +32,7 @@ Reads 4 water level probes (via BC547 NPN transistors), monitors battery voltage
 | 17 | PC7 | SPI1_MISO | **LoRa MISO** | Input (Pull-up) | SPI Master In |
 | 18 | PD1 | SWIO | **Programming (SWD)** | Bidirectional | Single-wire debug — test pad |
 | 19 | PD2 | GPIO Out | **Status LED** | Output | Via 1kΩ resistor to LED |
-| 20 | PD3 | GPIO | **NC** (Available) | — | Spare GPIO |
+| 20 | PD3 | GPIO Out | **Sensor Power Pin** | Output | Pulsed 2ms common wire drive (zero-corrosion) |
 
 ---
 
@@ -141,45 +141,138 @@ graph TB
 | 4 | Q2 | NPN Transistor | BC547 | TO-92 | 1 | Probe 50% buffer |
 | 5 | Q3 | NPN Transistor | BC547 | TO-92 | 1 | Probe 75% buffer |
 | 6 | Q4 | NPN Transistor | BC547 | TO-92 | 1 | Probe 100% buffer |
-| 7 | C1 | Bulk Capacitor | **100µF** electrolytic | Through-hole | 1 | **Battery ke paas** |
+| 7 | C1 | Bulk Capacitor | **100µF** (Ceramic / Non-polarized) | Radial / 1206 | 1 | **Battery ke paas (Main reservoir)** |
 | 8 | C2 | Bulk Capacitor | **10µF** ceramic | 0805 / TH | 1 | **LoRa Ra-02 ke paas** |
 | 9 | C3 | Decoupling Cap | **104 (100nF)** ceramic | 0603 | 1 | **LoRa Ra-02 ke paas** |
 | 10 | C4 | Decoupling Cap | **104 (100nF)** ceramic | 0603 | 1 | **MCU VDD/GND ke paas** |
 | 11 | C5 | Reset Cap | **104 (100nF)** ceramic | 0603 | 1 | **NRST to GND** |
-| 12 | R1 | Battery Divider High | 100kΩ | 0603 | 1 | Battery+ to PA1 |
-| 13 | R2 | Battery Divider Low | 100kΩ | 0603 | 1 | PA1 to GND |
-| 14 | R3 | Reset Pull-up | 10kΩ | 0603 | 1 | NRST to VDD |
-| 15 | R4 | LED Resistor | 1kΩ | 0603 | 1 | PD2 to LED anode |
-| 16 | R5 | Probe Base Resistor | 100kΩ | 0603 | 1 | Q1 base (25%) |
-| 17 | R6 | Probe Base Resistor | 100kΩ | 0603 | 1 | Q2 base (50%) |
-| 18 | R7 | Probe Base Resistor | 100kΩ | 0603 | 1 | Q3 base (75%) |
-| 19 | R8 | Probe Base Resistor | 100kΩ | 0603 | 1 | Q4 base (100%) |
-| 20 | D1 | Status LED | Green LED | 0603/0805 | 1 | Status indicator |
-| 21 | SW1 | Push Button | Tactile switch 6mm | SMD/TH | 1 | PD6, active LOW |
-| 22 | SW2 | Power Switch | SPST slide switch | Through-hole | 1 | Battery disconnect |
-| 23 | J1 | Battery Holder | 2x AA holder | Through-hole | 1 | 3.0V (2 × 1.5V) |
-| 24 | J2 | Programming Header | 1×3 pin header | 2.54mm | 1 | VCC, SWIO (PD1), GND |
-| 25 | J3 | Sensor Connector | 1×5 pin header | 2.54mm | 1 | 4 probes + Common (VCC) |
-| 26 | J4 | Debug UART (Optional) | 1×2 pin header | 2.54mm | 1 | PD5 TX + GND |
-| 27 | ANT1 | Antenna | Spring / IPEX | — | 1 | 433 MHz — comes with Ra-02 |
+| 12 | C6-C10 | Probe Filter Caps | **104 (100nF)** ceramic | 0603 | 5 | **Probe inputs & Common wire to GND (ESD/Noise Filter)** |
+| 13 | F1 | Resettable Fuse (PTC) | **Littelfuse 1206L / Bourns 500mA** | 1206 SMD | 1 | **Overcurrent & Short-circuit Protection** |
+| 14 | Q6 | P-Channel MOSFET | **AO3401A / SI2301** | SOT-23 | 1 | **Common Wire High-Side Driver (Pulsed 3.3V/3.0V)** |
+| 15 | Q5 (Option B) | P-Channel MOSFET | **AO3401A / SI2301** | SOT-23 | 0/1 | **Zero-Drop Reverse Protection (Used only with 2x AA direct)** |
+| 16 | U3 (Option A) | 3.3V LDO Regulator | **HT7333-2 (SOT-89) / XC6206P332MR (SOT-23)** | SOT-89 / SOT-23 | 0/1 | **3.3V Voltage Regulator (Used with 4x AA battery)** |
+| 17 | D2 (Option A) | Protection / Step-Down Diode | **1N4002-T / 1N4007G-T / M7** | DO-41 / SMA | 0/1 | **0.7V Drop & Reverse Protection (Used with 4x AA + LDO)** |
+| 18 | R3 | Reset Pull-up | 10kΩ | 0603 | 1 | NRST to VDD |
+| 19 | R4 | LED Resistor | 1kΩ | 0603 | 1 | PD2 to LED anode |
+| 20 | R5-R8 | Probe Base Resistors | 100kΩ | 0603 | 4 | Q1-Q4 base (25%, 50%, 75%, 100%) |
+| 21 | R9 | Common Gate Pull-Up | 100kΩ | 0603 | 1 | Q6 Gate to VCC (Ensures 0V during sleep) |
+| 22 | D1 | Status LED | Green LED | 0603/0805 | 1 | Status indicator |
+| 23 | SW1 | Push Button | Tactile switch 6mm | SMD/TH | 1 | PD6, active LOW |
+| 24 | SW2 | Power Switch | SPST slide switch | Through-hole | 1 | Battery disconnect |
+| 25 | J1 | Battery Holder | **4x AA Holder (Option A) / 2x AA Holder (Option B)** | Through-hole / Lead | 1 | 6.0V (Option A) or 3.0V (Option B) |
+| 26 | J2 | Programming Header | 1×3 pin header | 2.54mm | 1 | VCC, SWIO (PD1), GND |
+| 27 | J3 | Sensor Connector | 1×5 pin header | 2.54mm | 1 | 4 probes + Common (VCC) |
+| 28 | J4 | Debug UART (Optional) | 1×2 pin header | 2.54mm | 1 | PD5 TX + GND |
+| 29 | ANT1 | Antenna | Spring / IPEX | — | 1 | 433 MHz — comes with Ra-02 |
 
 ---
 
-## Detailed Schematic — All Sections
+## Detailed Schematic & Circuit Illustrations
 
-### Section 1: Power Supply
+### 📸 Full PCB Schematic Overview (All 4 Sections)
+
+![Full Tank Sensor Schematic Diagram](C:\Users\shaik\.gemini\antigravity-ide\brain\eda63660-c011-481e-82a8-875d67243346\full_tank_sensor_schematic_1787126945280.jpg)
+
+### 📸 Q6 Common Wire P-MOSFET High-Side Driver
+
+![Q6 Common Probe P-MOSFET Driver](C:\Users\shaik\.gemini\antigravity-ide\brain\eda63660-c011-481e-82a8-875d67243346\q6_common_driver_schematic_1787126083634.jpg)
+
+---
+
+### Section 1: Power Supply & Protection Architecture Options
+
+Users can choose between **Option A (4x AA Long Life with LDO)** or **Option B (2x AA Minimal Direct)**:
+
+#### 🟢 Option A: 4x AA Battery Setup (6.0V / 6.4V with Diode & 3.3V LDO) — [5 to 7 Years Life]
 
 ```
-                       SW2 (Power Switch)
-2x AA Battery (+) ─────┤ ON/OFF ├─────┬──── VDD (3.0V Power Rail)
-   (3.0V)                              │
-                                       │
-                                  C1 (100µF) ── GND
-                                  ← Battery ke BILKUL paas!
-                                  ← Main energy reservoir
-
-2x AA Battery (-) ──────────────────── GND
+4x AA (+) ─── [ F1 (500mA PTC) ] ─── [ D2 (1N4002/1N4007) ] ───► SW2 ───► [ U3: 3.3V LDO ] ──┬── VCC (3.3V Rail)
+ (6.4V)                                  (0.7V Drop & Reverse)             (HT7333-2/7 /        │
+                                                                           XC6206P332MR)  C1 (100µF)
+4x AA (-) ────────────────────────── GND ─────────────────────────────────────────────────────┴── GND
 ```
+
+* **1. Resettable Fuse (`F1`)**: `Littelfuse 1206L / Bourns 500mA PTC` — Short circuit aur overcurrent protection ke liye (Hamesha battery ke baad pehla component).
+* **2. Protection & Step-Down Diode (`D2`)**: `1N4002-T` / `1N4007G-T` (DO-41 Through-Hole) ya `M7` / `SS14` (SMD).
+  * 6.4V (naye cell) ko kam karke **5.7V safe voltage** banata hai taaki LDO kabhi overvoltage se na jale.
+  * Saath me **Reverse Polarity Protection** bhi provide karta hai.
+  * **MOSFET `Q5` is setup me remove ho jata hai** (kyunki Diode dono kaam akele kar deta hai).
+* **3. Power Switch (`SW2`)**: SPST Slide Switch — Board ko manually ON/OFF karne ke liye.
+* **4. 3.3V LDO Regulator (`U3`)**:
+  * **Choice 1**: **`HT7333-2`** (Holtek / SOT-89-3 / 30V Max Input / 2.5µA $I_q$).
+  * **Choice 2**: **`XC6206P332MR`** (TWGMC / SOT-23 / 6.0V Max Input / 8.0µA $I_q$).
+* **5. Bulk Reservoir Capacitor (`C1`)**: 100µF Capacitor — LoRa aur MCU ke power spikes ke liye energy tank.
+* **Advantage**: Rock-solid 3.3V rail through the entire discharge curve, **5 se 7 Saal** battery life!
+
+---
+
+#### 🔵 Option B: 2x AA Battery Setup (3.0V Direct — Zero Extra IC) — [2 to 3 Years Life]
+
+```
+                                              Q5 (AO3401A P-MOSFET)
+                                                  Source ── Drain
+                                                     │        │
+2x AA (+) ─── [ F1 (500mA PTC) ] ────────────────────┴──[Gate]┴─────── SW2 ──────┬──── VCC (3.0V Rail)
+ (3.0V)                                                    │                      │
+                                                          GND                C1 (100µF)
+                                                                                  │
+2x AA (-) ─────────────────── GND ─────────────────────────────────────────────── GND
+```
+
+* **1. Resettable Fuse (`F1`)**: `Littelfuse 1206L / Bourns 500mA PTC` — Short circuit aur overcurrent protection.
+* **2. Protection MOSFET (`Q5`)**: `AO3401A` P-MOSFET zero-voltage drop ($0.004\text{V}$) ke saath reverse polarity protection deta hai.
+* **3. Power Switch (`SW2`)**: SPST Slide Switch — Board ko manually ON/OFF karne ke liye.
+* **4. Bulk Reservoir Capacitor (`C1`)**: 100µF Capacitor — Battery ke paas main energy storage.
+* **5. No LDO Regulator**: Direct 3.0V MCU aur LoRa ko chala deta hai (0mW heat waste).
+* **Advantage**: Lowest component count, ₹0 extra cost, **2 se 3 Saal** battery life.
+
+---
+
+> [!NOTE]
+> **Important**: `Q6` P-MOSFET (AO3401A) water common wire high-side switch **dono options me hamesha lagega** taaki deep sleep ke waqt tanki ke paani me 0V rahe aur reading ke time pulsed 3.3V/3.0V jaye!
+
+### Section 2: Water Level Sensing & Common Wire P-MOSFET Driver
+
+```
+                           VCC (3.0V)
+                               │
+                           [ R9 100k ]
+                               │
+ MCU PD3 (Pin 20) ─────────────┴──────[ Gate (Pin 1) ]
+                                         │
+                   VCC (3.0V) ───────[ Source (Pin 2) ] Q6 (AO3401A P-MOSFET)
+                                     [ Drain  (Pin 3) ]
+                                         │
+                                   SENSOR_COMMON (Full 3.0V Pulsed)
+                                         ├─── C10 (100nF) ── GND  (Common Noise/ESD Filter)
+                                         │
+                                         ▼
+                            [ J3 Pin 5: Common Probe in Tank ]
+                                         │
+                             ~~~ Water in Tank ~~~
+                                         │
+            ┌──────────────┬─────────────┴────────────┬──────────────┐
+            │ (25%)        │ (50%)                    │ (75%)        │ (100%)
+            ▼              ▼                          ▼              ▼
+         J3 Pin 1       J3 Pin 2                   J3 Pin 3       J3 Pin 4
+            ├─[C6 100nF]   ├─[C7 100nF]               ├─[C8 100nF]   ├─[C9 100nF]
+            │    │         │    │                     │    │         │    │
+            │   GND        │   GND                    │   GND        │   GND
+            │              │                          │              │
+        [R5 100k]      [R6 100k]                  [R7 100k]      [R8 100k]
+            │              │                          │              │
+         Base Q1        Base Q2                    Base Q3        Base Q4
+         (BC547)        (BC547)                    (BC547)        (BC547)
+            │              │                          │              │
+      Collector PC0  Collector PC1              Collector PC2  Collector PC4
+```
+
+### 📋 MOSFET Pinout & Connections Table (AO3401A / SOT-23)
+
+| MOSFET Ref | Purpose / Function | Pin 1 (Gate) | Pin 2 (Source) | Pin 3 (Drain) | Operating Logic |
+|---|---|---|---|---|---|
+| **Q5** | **Reverse Polarity Protection** | **GND** | **F1 (PTC Fuse / Battery +)** | **SW2 (Power Switch)** | Battery seedhi lagne par **Always ON** (drop ~0.004V). Battery ulti lagne par **Instant OFF** |
+| **Q6** | **Common Wire High-Side Driver** | **MCU PD3 (Pin 20)** + **R9** (100kΩ Pull-up to VCC) | **VCC (3.0V Power Rail)** | **SENSOR_COMMON** (J3 Pin 5 & C10 100nF to GND) | **Sleep**: PD3=HIGH → Q6 OFF (0V in water).<br>**Read**: PD3=LOW → Q6 ON (3.0V in water for 10ms) |
 
 **Then VDD rail goes to:**
 ```
@@ -194,11 +287,13 @@ VDD Rail ──┬── MCU VDD (Pin 9) ──┬── C4 (104/100nF) ── G
 
 > [!IMPORTANT]
 > **Capacitor chain logic:**
-> - 100µF (battery) → poore board ka energy tank
-> - 10µF (LoRa) → LoRa TX ke 120mA+ spikes local handle
-> - 104/100nF (LoRa) → SPI high-frequency noise clean
-> - 104/100nF (MCU) → MCU switching noise clean
-> - 104/100nF (NRST) → Clean power-on reset
+> - **100µF (C1 - Battery)** → Poore board ka main bulk energy tank
+> - **10µF (C2 - LoRa)** → LoRa TX ke 120mA+ current spikes local handle
+> - **104/100nF (C3 - LoRa)** → LoRa high-frequency SPI noise clean
+> - **104/100nF (C4 - MCU)** → MCU digital switching noise clean
+> - **104/100nF (C5 - Reset)** → Clean power-on reset filtering
+> - **104/100nF (C6, C7, C8, C9 - Probes 25%, 50%, 75%, 100%)** → Tanki ke lambe wire se aane wale RF, ESD, static surges aur AC noise ko GND me filter karte hain
+> - **104/100nF (C10 - Common Wire)** → Common probe line ki noise aur ESD protection
 
 ---
 
@@ -301,19 +396,6 @@ VCC (3.0V) ─── Common Wire ─── [PAANI MEIN 💧]
 
 ---
 
-### Section 5: Battery Monitoring (Voltage Divider)
-
-```
-Battery (+) ── R1 (100kΩ) ──┬── PA1 (Pin 5) ADC Input
-                              │
-                         R2 (100kΩ)
-                              │
-                             GND
-```
-
-Divides battery voltage by 2: 3.0V → 1.5V at ADC pin.
-
----
 
 ### Section 6: LED Circuit
 

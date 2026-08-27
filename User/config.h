@@ -43,15 +43,22 @@
 #define BUTTON_PIN              GPIO_Pin_6 // PD6
 #define LED_PIN                 GPIO_Pin_2    // PD2
 
+// LED Logic: Active-HIGH (Pin HIGH = ON, Pin LOW = OFF)
+#define LED_ON()                GPIO_SetBits(GPIOD, LED_PIN)
+#define LED_OFF()               GPIO_ResetBits(GPIOD, LED_PIN)
+
 // Water Level Probe Pins (Input with Pull-up)
 #define SENSOR_PIN_25           GPIO_Pin_0  // PC0
 #define SENSOR_PIN_50           GPIO_Pin_1  // PC1
 #define SENSOR_PIN_75           GPIO_Pin_2  // PC2
 #define SENSOR_PIN_100          GPIO_Pin_4 // PC4
 
-// Water Level Probe Common Power Pin (Pulsed 2ms Drive for Ultra-Low Power &
-// Zero Corrosion)
+// Water Level Probe Common Power Pin (P-MOSFET High-Side Switch: Gate LOW = ON, Gate HIGH = OFF)
 #define SENSOR_POWER_PIN        GPIO_Pin_3 // PD3 (Pin 20)
+// P-MOSFET Logic: Gate LOW = ON, Gate HIGH = OFF
+// 3.3V Rail -> P-MOSFET Gate -> 3.0V Source -> Probes
+#define SENSOR_POWER_ON()       GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN) // Pull Gate LOW -> P-MOSFET ON
+#define SENSOR_POWER_OFF()      GPIO_SetBits(GPIOD, SENSOR_POWER_PIN)   // Pull Gate HIGH -> P-MOSFET OFF
 
 // Sensor Logic Constants
 #define LEVEL_DEBOUNCE_CYCLES   2  // Consecutive wake cycles required to confirm level change (~10s anti-slosh)

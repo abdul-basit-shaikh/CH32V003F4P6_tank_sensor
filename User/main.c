@@ -134,40 +134,37 @@ void AWU_IRQHandler(void) {
 }
 
 void exti_init(void) {
-  // Enable AFIO clock BEFORE configuring line mapping
+  // Enable AFIO and PWR clock BEFORE configuring line mapping
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+  RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
 
   EXTI_InitTypeDef EXTI_InitStructure = {0};
+  NVIC_InitTypeDef NVIC_InitStructure = {0};
 
-  // Sensor Pins on Port C: PC0, PC1, PC2, PC4
-  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource0);
-  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource1);
-  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource2);
-  GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource4);
-
-  EXTI_InitStructure.EXTI_Line =
-      EXTI_Line0 | EXTI_Line1 | EXTI_Line2 | EXTI_Line4;
+  // Button Pin on Port D: PD6 (Active LOW - Falling Edge Wakeup)
+  GPIO_EXTILineConfig(GPIO_PortSourceGPIOD, GPIO_PinSource6);
+  EXTI_InitStructure.EXTI_Line = EXTI_Line6;
   EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
-  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising_Falling;
+  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
   EXTI_InitStructure.EXTI_LineCmd = ENABLE;
   EXTI_Init(&EXTI_InitStructure);
 
-  // Button Pin on Port D: PD6
-  GPIO_EXTILineConfig(GPIO_PortSourceGPIOD, GPIO_PinSource6);
-  EXTI_InitStructure.EXTI_Line = EXTI_Line6;
-  EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
-  EXTI_Init(&EXTI_InitStructure);
-
-  // Auto Wake-up (AWU) Event on EXTI Line 9 (Crucial for AWU wakeup!)
+  // Auto Wake-up (AWU) Event on EXTI Line 9
   EXTI_InitStructure.EXTI_Line = EXTI_Line9;
   EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
   EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
   EXTI_InitStructure.EXTI_LineCmd = ENABLE;
   EXTI_Init(&EXTI_InitStructure);
 
-  // Enable NVIC for EXTI Line 7-0 and AWU
-  NVIC_InitTypeDef NVIC_InitStructure = {0};
+  // Enable NVIC for Button EXTI Line 6
   NVIC_InitStructure.NVIC_IRQChannel = EXTI7_0_IRQn;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
+  NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+  NVIC_Init(&NVIC_InitStructure);
+
+  // Enable NVIC for AWU Auto Wake-up
+  NVIC_InitStructure.NVIC_IRQChannel = AWU_IRQn;
   NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
   NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
   NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
@@ -176,44 +173,40 @@ void exti_init(void) {
 
 void EXTI7_0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void EXTI7_0_IRQHandler(void) {
-  if (EXTI_GetITStatus(EXTI_Line0) != RESET ||
-      EXTI_GetITStatus(EXTI_Line1) != RESET ||
-      EXTI_GetITStatus(EXTI_Line2) != RESET ||
-      EXTI_GetITStatus(EXTI_Line4) != RESET) {
-    g_sensor_event_pending = 1;
-  }
-
   if (EXTI_GetITStatus(EXTI_Line6) != RESET) {
     g_button_event_pending = 1;
+    EXTI_ClearITPendingBit(EXTI_Line6);
   }
-
-  // Clear all pending flags for sensor pins and button
-  EXTI_ClearITPendingBit(EXTI_Line0 | EXTI_Line1 | EXTI_Line2 | EXTI_Line4 |
-                         EXTI_Line6);
 }
 
 void enter_deep_sleep(void) {
   DEBUG_PRINT("[PWR] Sleep (5s AWU)...\r\n");
   Delay_Ms(5); // Flush UART
 
-  // Ensure all power pins & LEDs are OFF during deep sleep
-  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN);
-  GPIO_SetBits(GPIOD, LED_PIN); // Active-low: HIGH = OFF
-  radio_power_down();           // Ensure SX1278 is in 0.2uA Sleep Mode
+  // 1. Ensure all power pins & LEDs are OFF during deep sleep
+  SENSOR_POWER_OFF(); // Keep Common wire P-MOSFET OFF
+  LED_OFF();          // Ensure LED is OFF in sleep (Active-HIGH)
+  radio_power_down(); // Ensure SX1278 is in 0.2uA Sleep Mode
 
-  // 1. Re-arm Auto Wakeup (AWU) timer before EVERY sleep
+  // 2. Stop 1ms TIM2 timer to prevent instant wakeups
+  TIM_Cmd(TIM2, DISABLE);
+  TIM_ITConfig(TIM2, TIM_IT_Update, DISABLE);
+  NVIC_DisableIRQ(TIM2_IRQn);
+  NVIC_ClearPendingIRQ(TIM2_IRQn);
+
+  // 3. Re-arm Auto Wakeup (AWU) timer for 5s (LSI ~128kHz / 61440 = 2.08Hz -> 10 counts = ~5s)
   RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
   PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
   PWR_AWU_SetWindowValue(10); // ~5 seconds periodic wake-up
   PWR_AutoWakeUpCmd(ENABLE);  // Arm the downcounter
 
-  // 2. Clear all previous pending interrupt flags
+  // 4. Clear all previous pending interrupt flags
   EXTI->INTFR = 0xFFFFFFFF;
-  EXTI_ClearITPendingBit(EXTI_Line9);
+  EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
   NVIC_ClearPendingIRQ(AWU_IRQn);
   NVIC_ClearPendingIRQ(EXTI7_0_IRQn);
 
-  // 3. Enter Stop mode (SLEEPDEEP=1, PDDS=0)
+  // 5. Enter Stop mode (SLEEPDEEP=1, PDDS=0)
   PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
   NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
 
@@ -221,15 +214,20 @@ void enter_deep_sleep(void) {
   __WFI(); // Wait for Interrupt (AWU timer fires in 5s OR user presses button)
   iwdg_feed(); // Feed watchdog immediately upon waking
 
-  // 4. Cleanup sleep state
+  // 6. Cleanup sleep state
   NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP
   PWR_AutoWakeUpCmd(DISABLE);
-  EXTI_ClearITPendingBit(EXTI_Line9);
+  EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
   NVIC_ClearPendingIRQ(AWU_IRQn);
 
-  // 5. System resumes here after wake up
+  // 7. System resumes here after wake up - Restart clocks & TIM2 timer
   SystemCoreClockUpdate();
   EXTI->INTFR = 0xFFFFFFFF;
+
+  // Restart TIM2 1ms timer
+  TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+  NVIC_EnableIRQ(TIM2_IRQn);
+  TIM_Cmd(TIM2, ENABLE);
 
   DEBUG_PRINT("[PWR] Wake\r\n");
 
@@ -532,9 +530,9 @@ static void handle_button_action(runtime_state_t *runtime,
     DEBUG_PRINT("[SYS] Reboot (3s Hold)...\r\n");
     // 2 slow blinks before restart
     for (int b = 0; b < 2; b++) {
-      GPIO_ResetBits(GPIOD, LED_PIN);
+      LED_ON();
       Delay_Ms(150);
-      GPIO_SetBits(GPIOD, LED_PIN);
+      LED_OFF();
       Delay_Ms(150);
     }
     NVIC->SCTLR |= (1 << 31); // SYSRESETREQ
@@ -700,9 +698,9 @@ static void send_instant_force_update(runtime_state_t *runtime) {
   DEBUG_PRINT("[SYS] Single Click -> Force Instant Send\r\n");
 
   // 1 Fast Blink Acknowledgement
-  GPIO_ResetBits(GPIOD, LED_PIN);
+  LED_ON();
   Delay_Ms(50);
-  GPIO_SetBits(GPIOD, LED_PIN);
+  LED_OFF();
 
   if (g_settings.pairing_status != 1) {
     DEBUG_PRINT("[SYS] Not Paired -> Run Pairing\r\n");
@@ -774,14 +772,14 @@ void gpio_init(void) {
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
   GPIO_Init(GPIOD, &GPIO_InitStructure);
 
-  GPIO_SetBits(GPIOD, LED_PIN); // Turn off at start (Active-Low)
+  LED_OFF(); // Turn off at start (Active-HIGH)
 
-  // Sensor Common Power: PD3 (Output Push-pull, initially 0V / OFF)
+  // Sensor Common Power: PD3 (Pin 20 - Output Push-pull controlling Q6 P-MOSFET)
   GPIO_InitStructure.GPIO_Pin = SENSOR_POWER_PIN;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
   GPIO_Init(GPIOD, &GPIO_InitStructure);
-  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN); // Keep OFF during sleep
+  SENSOR_POWER_OFF(); // Keep Common wire P-MOSFET OFF at start
 
   // Sensor Pins: PC0, PC1, PC2, PC4 (Input Pull-up)
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
@@ -798,15 +796,7 @@ void gpio_init(void) {
  * @brief Reads all tank probes and applies software patches for hardware
  * reliability and fault monitoring.
  *
- * LOGIC EXPLANATION (Hardware Patch):
- * In a standard water tank, if a higher probe (e.g., 50%) is touching water,
- * all probes below it (e.g., 25%) MUST also be touching water.
- * If a lower probe wire is broken or the probe is oxidized, it might
- * report "Dry" even when the tank is half full.
- *
- * This function handles two critical tasks:
- * 1. PROBE FAULT DETECTION: It checks if there's a "gap" in readings (e.g.,
- *    100% is wet but 25% is dry). If a gap is found, it sets g_probe_fault=1
+ * 1. FAULT DETECTION: Detects if high probes are wet while lower probes are dry
  *    to alert the user about possible broken wires or dirty sensors.
  *
  * 2. BROKEN WIRE FIX: Even if a lower probe is faulty, the function
@@ -817,8 +807,8 @@ void gpio_init(void) {
  * Required" alert if hardware maintenance is needed.
  */
 uint8_t read_internal_probes(uint8_t *fault_out) {
-  // 1. Power ON the common probe wire (PD3)
-  GPIO_SetBits(GPIOD, SENSOR_POWER_PIN);
+  // 1. Power ON the common probe wire via Q6 P-MOSFET (Full VCC to water)
+  SENSOR_POWER_ON();
   Delay_Ms(PROBE_SETTLE_DELAY_MS); // 10ms robust stabilization for long tank wires & low-TDS water
 
   // 2. Take multi-samples to filter contact resistance & AC ripple (2ms multi-sample)
@@ -835,8 +825,8 @@ uint8_t read_internal_probes(uint8_t *fault_out) {
     Delay_Ms(2);
   }
 
-  // 3. Power OFF probe wire immediately (keeps average power < 0.01mW)
-  GPIO_ResetBits(GPIOD, SENSOR_POWER_PIN);
+  // 3. Power OFF probe wire immediately (keeps average power < 0.01mW & 0% corrosion)
+  SENSOR_POWER_OFF();
   Delay_Ms(1); // Settle & drain residual wire capacitance
 
   // Majority vote: >= PROBE_MAJORITY_VOTE out of PROBE_SAMPLE_COUNT (e.g. >= 3 out of 5)
@@ -1121,8 +1111,8 @@ void run_pairing(void) {
 
     iwdg_feed(); // Feed watchdog on each pairing burst
 
-    // 1. Ensure LED is OFF during TX to save 10mA current load
-    GPIO_SetBits(GPIOD, LED_PIN);
+    // 1. Ensure LED is OFF during TX to save current
+    LED_OFF();
 
     // 2. Send pairing request (Soft-Start + 30ms pre-charge)
     radio_power_up_tx();
@@ -1135,9 +1125,9 @@ void run_pairing(void) {
 
     // 4. Visual LED blink during RX listening window
     if ((i % 2) < 1)
-      GPIO_ResetBits(GPIOD, LED_PIN); // LED ON during RX
+      LED_ON(); // LED ON during RX
     else
-      GPIO_SetBits(GPIOD, LED_PIN);  // LED OFF
+      LED_OFF(); // LED OFF
 
     // 5. Wait for ACK from controller
     uint32_t start = millis();
@@ -1204,15 +1194,15 @@ void run_pairing(void) {
     }
   }
 
-  GPIO_SetBits(GPIOD, LED_PIN); // LED OFF
+  LED_OFF(); // LED OFF
   radio_power_down();
 
   if (paired) {
     // Success feedback: Fast 5x blink
     for (int i = 0; i < 5; i++) {
-      GPIO_ResetBits(GPIOD, LED_PIN);
+      LED_ON();
       Delay_Ms(100);
-      GPIO_SetBits(GPIOD, LED_PIN);
+      LED_OFF();
       Delay_Ms(100);
     }
     DEBUG_PRINT("[PAIR] DONE\r\n");
@@ -1224,9 +1214,9 @@ void run_pairing(void) {
 
     // Failure feedback: Slow 3x blink
     for (int i = 0; i < 3; i++) {
-      GPIO_ResetBits(GPIOD, LED_PIN);
+      LED_ON();
       Delay_Ms(500);
-      GPIO_SetBits(GPIOD, LED_PIN);
+      LED_OFF();
       Delay_Ms(500);
     }
     DEBUG_PRINT("[PAIR] FAIL after %d tries\r\n", PAIRING_BURST_COUNT);
@@ -1271,12 +1261,12 @@ int main(void) {
 
   // Boot UI: Fast 5x blink (60ms ON, 60ms OFF = 360ms total)
   for (int i = 0; i < 5; i++) {
-    GPIO_ResetBits(GPIOD, LED_PIN); // ON
+    LED_ON(); // ON
     Delay_Ms(100);
-    GPIO_SetBits(GPIOD, LED_PIN); // OFF
+    LED_OFF(); // OFF
     Delay_Ms(100);
   }
-  GPIO_SetBits(GPIOD, LED_PIN); // Extra safety: ensure LED is OFF
+  LED_OFF(); // Extra safety: ensure LED is OFF
 
   DEBUG_PRINT("[SYS] Idle (Hold btn=pair)\r\n");
 

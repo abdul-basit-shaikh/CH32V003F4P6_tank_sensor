@@ -127,7 +127,7 @@ uint8_t lora_init(void) {
     SPI_InitTypeDef SPI_InitStructure = {0};
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD |
-                           RCC_APB2Periph_SPI1,
+                           RCC_APB2Periph_SPI1 | RCC_APB2Periph_AFIO,
                            ENABLE);
 
     // SCK (PC5), MOSI (PC6)
