@@ -44,7 +44,7 @@ void adc_init(void);
 void exti_init(void);
 void pwr_sleep_init(void);
 void timer_init(void);
-void enter_deep_sleep(void);
+void enter_deep_sleep(uint8_t total_sleep_sec);
 void flash_read_settings(void);
 void flash_save_settings(void);
 void iwdg_init(void);
@@ -81,6 +81,7 @@ typedef struct runtime_state {
   uint8_t link_quality;
   uint8_t last_rpd_seen;
   bool link_quality_valid;
+  uint8_t active_filling_cycles;
 } runtime_state_t;
 
 typedef enum {
@@ -179,8 +180,8 @@ void EXTI7_0_IRQHandler(void) {
   }
 }
 
-void enter_deep_sleep(void) {
-  DEBUG_PRINT("[PWR] Sleep (5s AWU)...\r\n");
+void enter_deep_sleep(uint8_t total_sleep_sec) {
+  DEBUG_PRINT("[PWR] Sleep (%ds AWU)...\r\n", total_sleep_sec);
   Delay_Ms(5); // Flush UART
 
   // 1. Ensure all power pins & LEDs are OFF during deep sleep
@@ -194,31 +195,44 @@ void enter_deep_sleep(void) {
   NVIC_DisableIRQ(TIM2_IRQn);
   NVIC_ClearPendingIRQ(TIM2_IRQn);
 
-  // 3. Re-arm Auto Wakeup (AWU) timer for 5s (LSI ~128kHz / 61440 = 2.08Hz -> 10 counts = ~5s)
+  uint8_t cycles = total_sleep_sec / AWU_BASE_TICK_SEC;
+  if (cycles == 0) {
+    cycles = 1;
+  }
+
   RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
-  PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
-  PWR_AWU_SetWindowValue(10); // ~5 seconds periodic wake-up
-  PWR_AutoWakeUpCmd(ENABLE);  // Arm the downcounter
 
-  // 4. Clear all previous pending interrupt flags
-  EXTI->INTFR = 0xFFFFFFFF;
-  EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
-  NVIC_ClearPendingIRQ(AWU_IRQn);
-  NVIC_ClearPendingIRQ(EXTI7_0_IRQn);
+  for (uint8_t i = 0; i < cycles; i++) {
+    // 3. Re-arm Auto Wakeup (AWU) timer for 5s (LSI ~128kHz / 61440 = 2.08Hz -> 10 counts = ~5s)
+    PWR_AWU_SetPrescaler(PWR_AWU_Prescaler_61440);
+    PWR_AWU_SetWindowValue(10); // ~5 seconds periodic wake-up
+    PWR_AutoWakeUpCmd(ENABLE);  // Arm the downcounter
 
-  // 5. Enter Stop mode (SLEEPDEEP=1, PDDS=0)
-  PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
-  NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
+    // 4. Clear all previous pending interrupt flags
+    EXTI->INTFR = 0xFFFFFFFF;
+    EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
+    NVIC_ClearPendingIRQ(AWU_IRQn);
+    NVIC_ClearPendingIRQ(EXTI7_0_IRQn);
 
-  iwdg_feed(); // Feed watchdog right before sleeping (8s window for 5s sleep)
-  __WFI(); // Wait for Interrupt (AWU timer fires in 5s OR user presses button)
-  iwdg_feed(); // Feed watchdog immediately upon waking
+    // 5. Enter Stop mode (SLEEPDEEP=1, PDDS=0)
+    PWR->CTLR &= ~PWR_CTLR_PDDS; // PDDS = 0
+    NVIC->SCTLR |= (1 << 2);     // Set SLEEPDEEP
 
-  // 6. Cleanup sleep state
-  NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP
-  PWR_AutoWakeUpCmd(DISABLE);
-  EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
-  NVIC_ClearPendingIRQ(AWU_IRQn);
+    iwdg_feed(); // Feed watchdog right before sleeping (8s window for 5s sleep)
+    __WFI(); // Wait for Interrupt (AWU timer fires in 5s OR user presses button)
+    iwdg_feed(); // Feed watchdog immediately upon waking
+
+    // 6. Cleanup sleep state
+    NVIC->SCTLR &= ~(1 << 2); // Clear SLEEPDEEP
+    PWR_AutoWakeUpCmd(DISABLE);
+    EXTI_ClearITPendingBit(EXTI_Line9 | EXTI_Line6);
+    NVIC_ClearPendingIRQ(AWU_IRQn);
+
+    // If button was pressed (PD6 Active LOW), wake up immediately without waiting for remaining cycles
+    if (g_button_event_pending || (GPIO_ReadInputDataBit(GPIOD, BUTTON_PIN) == 0)) {
+      break;
+    }
+  }
 
   // 7. System resumes here after wake up - Restart clocks & TIM2 timer
   SystemCoreClockUpdate();
@@ -343,6 +357,7 @@ static void reset_runtime_tracking(runtime_state_t *runtime) {
   runtime->link_quality = 0;
   runtime->last_rpd_seen = 0;
   runtime->link_quality_valid = false;
+  runtime->active_filling_cycles = 0;
   g_sensor_event_pending = 0;
   g_button_event_pending = 0;
 }
@@ -371,13 +386,15 @@ static uint8_t sample_filtered_level(runtime_state_t *runtime) {
       if (runtime->candidate_count >= LEVEL_DEBOUNCE_CYCLES) {
         runtime->filtered_level = runtime->candidate_level;
         runtime->candidate_count = 0;
-        DEBUG_PRINT("[SYS] Lvl Confirmed: %d%%\r\n", runtime->filtered_level);
+        runtime->active_filling_cycles = ACTIVE_FILLING_HOLD_CYCLES; // Reload 1-min active window
+        DEBUG_PRINT("[SYS] Lvl Confirmed: %d%% (1-Min Timer Reloaded)\r\n", runtime->filtered_level);
       }
     } else {
-      // First time seeing this new level -> start candidate tracking
+      // First time seeing this new level -> start candidate tracking & reload 1-min active timer
       runtime->candidate_level = raw_level;
       runtime->candidate_count = 1;
-      DEBUG_PRINT("[SYS] New Candidate Lvl %d%% (1/%d)\r\n",
+      runtime->active_filling_cycles = ACTIVE_FILLING_HOLD_CYCLES; // Reload 1-min active window
+      DEBUG_PRINT("[SYS] New Candidate Lvl %d%% (1/%d) (1-Min Timer Reloaded)\r\n",
                   runtime->candidate_level, LEVEL_DEBOUNCE_CYCLES);
 
 #if (LEVEL_DEBOUNCE_CYCLES <= 1)
@@ -1363,6 +1380,11 @@ int main(void) {
           g_runtime.pending_level = current_level;
           g_runtime.wake_retry_count = 0;
           g_runtime.seq_num++;
+
+          if (level_changed) {
+            g_runtime.active_filling_cycles = ACTIVE_FILLING_HOLD_CYCLES;
+            DEBUG_PRINT("[SYS] Active Filling Window Started (60s Fast Mode)\r\n");
+          }
         } else {
           // NO ACK after DATA_MAX_RETRIES (15 tries)
           DEBUG_PRINT("[TX] NO ACK on wake attempt %d/3 after %d retries\r\n",
@@ -1385,10 +1407,26 @@ int main(void) {
       DEBUG_PRINT("[SYS] Not paired. Hold button to pair.\r\n");
     }
 
-    // 3. Enter Deep Sleep (Saves battery in both paired and un-paired mode)
-    DEBUG_PRINT("[SYS] Sleep\r\n");
+    // 3. Enter Deep Sleep with Dynamic Adaptive Timing (Steady: 15s, Transition/Active: 5s)
+    uint8_t sleep_sec = SLEEP_INTERVAL_STEADY_SEC;
+    if (g_settings.pairing_status == 1 &&
+        (g_runtime.candidate_count > 0 || g_runtime.active_filling_cycles > 0)) {
+      sleep_sec = SLEEP_INTERVAL_FAST_SEC;
+      if (g_runtime.candidate_count > 0) {
+        DEBUG_PRINT("[SYS] Transition State: Fast Sleep %ds (Candidate %d%% hold %d/%d)\r\n",
+                    sleep_sec, g_runtime.candidate_level, g_runtime.candidate_count,
+                    LEVEL_DEBOUNCE_CYCLES);
+      } else {
+        DEBUG_PRINT("[SYS] Active Filling Mode: Fast Sleep %ds (Hold %ds remaining)\r\n",
+                    sleep_sec, (int)(g_runtime.active_filling_cycles * SLEEP_INTERVAL_FAST_SEC));
+        g_runtime.active_filling_cycles--;
+      }
+    } else {
+      DEBUG_PRINT("[SYS] Steady State: Sleep %ds\r\n", sleep_sec);
+    }
     DEBUG_PRINT("----------\r\n");
-    enter_deep_sleep();
-    g_runtime.sleep_cycle_count++; // Increment cycles on each AWU wake
+
+    enter_deep_sleep(sleep_sec);
+    g_runtime.sleep_cycle_count += (sleep_sec / AWU_BASE_TICK_SEC); // Increment elapsed cycle count accurately
   }
 }
