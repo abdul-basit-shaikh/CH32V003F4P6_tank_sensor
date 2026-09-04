@@ -37,6 +37,7 @@
 
 #define PA_BOOST                    0x80
 #define IRQ_TX_DONE_MASK            0x08
+#define IRQ_PAYLOAD_CRC_ERROR_MASK  0x20
 #define IRQ_RX_DONE_MASK            0x40
 
 static uint8_t spi_transfer(uint8_t data) {
@@ -269,11 +270,23 @@ uint8_t lora_send(const uint8_t *buf, size_t size) {
 
 bool lora_available(void) {
     uint8_t irq = lora_read_reg(REG_IRQ_FLAGS);
-    return (irq & IRQ_RX_DONE_MASK) != 0;
+    if (irq & IRQ_RX_DONE_MASK) {
+        if (irq & IRQ_PAYLOAD_CRC_ERROR_MASK) {
+            DEBUG_PRINT("[LORA RX] CRC Error! Discarding packet.\r\n");
+            lora_write_reg(REG_IRQ_FLAGS, IRQ_PAYLOAD_CRC_ERROR_MASK | IRQ_RX_DONE_MASK);
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 uint8_t lora_read(uint8_t *buf, uint8_t max_len) {
     uint8_t irq = lora_read_reg(REG_IRQ_FLAGS);
+    if (irq & IRQ_PAYLOAD_CRC_ERROR_MASK) {
+        lora_write_reg(REG_IRQ_FLAGS, IRQ_PAYLOAD_CRC_ERROR_MASK | IRQ_RX_DONE_MASK);
+        return 0;
+    }
     if ((irq & IRQ_RX_DONE_MASK) == 0) return 0;
 
     uint8_t count = lora_read_reg(REG_RX_NB_BYTES);

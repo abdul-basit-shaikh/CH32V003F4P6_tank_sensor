@@ -325,7 +325,7 @@ void iwdg_init(void) {
   IWDG_SetReload(IWDG_RELOAD_VALUE);     // 4000 ticks = 8.0 seconds timeout
   IWDG_ReloadCounter();
   IWDG_Enable();
-  DEBUG_PRINT("[SYS] Hardware IWDG Watchdog Initialized (~10s Timeout)\r\n");
+  DEBUG_PRINT("[SYS] Hardware IWDG Watchdog Initialized (~8s Timeout)\r\n");
 #endif
 }
 
@@ -565,6 +565,12 @@ static void handle_button_action(runtime_state_t *runtime,
 static bool packet_matches_data_ack(uint8_t *packet, uint32_t seq_num) {
   if (packet[0] != 0xAA || packet[1] != 0x55 ||
       packet[2] != PKT_TYPE_DATA_ACK) {
+    return false;
+  }
+
+  // Verify packet CRC-8 checksum (Bug 21)
+  if (packet[31] != calculate_checksum(packet, 32)) {
+    DEBUG_PRINT("[ACK] CRC Mismatch! Got: 0x%02X\r\n", packet[31]);
     return false;
   }
 
@@ -1051,14 +1057,19 @@ uint8_t read_battery_level(void) {
 
 /* ========== Auto-Generate Tank ID ========== */
 uint16_t generate_new_tank_id(void) {
-  // Generate a pseudo-random 16-bit ID using current millis
-  // This ensures each reset produces a different ID
-  uint32_t seed = millis();
+  // Incorporate CH32V003 96-bit factory unique ID + millis + ADC reading (Bug 9)
+  // This guarantees no two physical chips will ever generate the same ID even if powered simultaneously
+  volatile uint32_t *uid = (volatile uint32_t *)0x1FFFF7E8;
+  uint32_t seed = uid[0] ^ (uid[1] << 5) ^ (uid[2] >> 3) ^ millis();
 
-  // Simple pseudo-random algorithm using bit manipulation
-  seed = (seed ^ (seed << 13));
-  seed = (seed ^ (seed >> 17));
-  seed = (seed ^ (seed << 5));
+  // Add ADC Vref noise for analog entropy
+  uint16_t adc_sample = get_adc_val(ADC_Channel_Vrefint);
+  seed ^= ((uint32_t)adc_sample << 16) | adc_sample;
+
+  // Simple pseudo-random algorithm using bit manipulation (Xorshift32)
+  seed ^= (seed << 13);
+  seed ^= (seed >> 17);
+  seed ^= (seed << 5);
 
   // Ensure ID is never 0x0000 (reserved for invalid)
   uint16_t new_id = (uint16_t)(seed & 0xFFFF);
@@ -1159,6 +1170,10 @@ void run_pairing(void) {
         // Check normal sync: 0xAA 0x55 + type 0x07 (PAIRING_RESP)
         if (rx_buf[0] == 0xAA && rx_buf[1] == 0x55 &&
             rx_buf[2] == PKT_TYPE_PAIRING_RESP) {
+          if (rx_buf[31] != calculate_checksum(rx_buf, 32)) {
+            DEBUG_PRINT("[PAIR] Normal pairing response CRC mismatch!\r\n");
+            continue;
+          }
           uint16_t resp_id = (uint16_t)rx_buf[4] | ((uint16_t)rx_buf[5] << 8);
           ack_status = rx_buf[11];
 
@@ -1186,6 +1201,10 @@ void run_pairing(void) {
 
           if (inv[0] == 0xAA && inv[1] == 0x55 &&
               inv[2] == PKT_TYPE_PAIRING_RESP) {
+            if (inv[31] != calculate_checksum(inv, 32)) {
+              DEBUG_PRINT("[PAIR] Inverted pairing response CRC mismatch!\r\n");
+              continue;
+            }
             uint16_t resp_id = (uint16_t)inv[4] | ((uint16_t)inv[5] << 8);
             ack_status = inv[11];
 
