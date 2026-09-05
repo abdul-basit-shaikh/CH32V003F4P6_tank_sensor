@@ -1157,12 +1157,17 @@ void run_pairing(void) {
     else
       LED_OFF(); // LED OFF
 
-    // 5. Wait for ACK from controller
+    // 5. Wait for ACK from controller (with random jitter to desynchronize multiple sensors)
+    uint16_t burst_wait_ms = PAIRING_ACK_WAIT_MS + ((new_id + (uint16_t)(millis() & 0xFF) + (uint16_t)(i * 47)) % 300);
     uint32_t start = millis();
-    while ((millis() - start) < PAIRING_ACK_WAIT_MS) {
+    while ((millis() - start) < burst_wait_ms) {
       if (radio_available()) {
         uint8_t rx_buf[32];
-        radio_read(rx_buf, 32);
+        uint8_t rx_len = radio_read(rx_buf, 32);
+        if (rx_len < 32) {
+          Delay_Ms(1);
+          continue;
+        }
 
         DEBUG_PRINT("[PAIR] RX: S=%02X%02X T=%02X\r\n", rx_buf[0], rx_buf[1],
                     rx_buf[2]);
